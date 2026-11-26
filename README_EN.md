@@ -552,7 +552,7 @@ Base your work on `dev` and open regular pull requests against `dev`. Maintainer
 
 This project is released under the Apache License 2.0. The following agreement is a supplement to the Apache License 2.0. In case of conflict, this agreement shall prevail.
 
-Apache License 2.0 copyright (c) 2026 [xcq0607](https://github.com/mdzzw)
+Apache License 2.0 copyright (c) 2026 [xcq0607](https://github.com/xcq0607)
 
 **Terminology**: "This Project" refers to LX Music Web Player; "User" refers to the user who agrees to this agreement; "Official Music Platforms" refers to the collective official platforms of the music sources built into this project, including Kuwo, Kugou, Migu, etc.; "Copyrighted Data" refers to data owned by others, including but not limited to images, audio, names, etc.
 

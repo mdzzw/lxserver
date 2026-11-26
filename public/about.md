@@ -589,6 +589,9 @@
         感谢 <strong><a href="https://github.com/lyswhut" target="_blank">lyswhut</a></strong> 与开源社区。
       </li>
     </ul>
+    <p style="margin: 0.75rem 0 0 0;">
+      同时感谢 <strong><a href="https://github.com/songloft-org/songloft" target="_blank">Songloft</a></strong> 的作者与社区对开源音乐服务的贡献。
+    </p>
   </div>
 
 <!-- Compliance & Legal Notice -->

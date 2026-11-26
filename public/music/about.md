@@ -568,7 +568,10 @@
       </li>
     </ul>
     <p style="margin: 0.75rem 0 0 0;">
-      本项目源码仓库：<strong><a href="https://github.com/mdzzw/lxserver" target="_blank">https://github.com/mdzzw/lxserver</a></strong>
+      同时感谢 <strong><a href="https://github.com/songloft-org/songloft" target="_blank">Songloft</a></strong> 的作者与社区对开源音乐服务的贡献。
+    </p>
+    <p style="margin: 0.75rem 0 0 0;">
+      本项目源码仓库：<strong><a href="https://github.com/XCQ0607/lxserver" target="_blank">https://github.com/XCQ0607/lxserver</a></strong>
     </p>
   </div>
 
