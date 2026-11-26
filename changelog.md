@@ -2,9 +2,12 @@
 
 ## v2.3.25 (2026-11-26)
 
-### 🛠 打包与维护
+### 🛠 仓库迁移与链接更新
 
-- 关于页「本项目源码仓库」链接更新为 https://github.com/mdzzw/lxserver 。
+- 项目源码与发布地址统一为 https://github.com/mdzzw/lxserver ，README、文档站、Issue 模板、关于页与 fnOS 安装包信息全部同步。
+- 「检查更新」改为读取仓库内的 `notice/notification.json`，更新提示直达新的 GitHub Releases 页面；检查失败时提供 GitHub 下载入口。
+- 文档中的 Docker 部署示例切换为 GHCR 镜像 `ghcr.io/mdzzw/lxserver:latest`，Docker 工作流仅发布 GHCR 镜像。
+- 安全漏洞上报方式调整为 GitHub 私有安全公告。
 - 重新构建 fnOS 安装包，支持在已安装旧版本的设备上覆盖升级。
 
 ## v2.3.24 (2026-11-26)

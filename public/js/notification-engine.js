@@ -1,14 +1,16 @@
 /**
- * PostHog 通用通知引擎 (混合模式 + 多样式美化版)
+ * 通用通知引擎 (版本更新 / 系统公告)
+ * 通知内容来自本项目 GitHub 仓库的 notice/notification.json，可直接在线修改后即时生效。
  * 核心特性：
- * 1. 优先级控制：System > Remote
+ * 1. 远程通知：从 GitHub 拉取通知配置，失败时引导前往 Releases 页面
  * 2. 队列系统：FIFO 队列处理
  * 3. 智能样式：根据 type 和 title 自动匹配图标与配色 (版本火箭、警告三角、广播铃铛)
  */
 (function () {
     // ================= 1. 基础配置与资源 =================
     const CONFIG = {
-        PRIORITY_KEYS: ['system_notification_config', 'remote_config_source'],
+        NOTICE_URL: 'https://raw.githubusercontent.com/mdzzw/lxserver/main/notice/notification.json',
+        RELEASES_URL: 'https://github.com/mdzzw/lxserver/releases/latest',
         getLocalVersion: () => (window.CONFIG && window.CONFIG.version) ? window.CONFIG.version : '0.0.0'
     };
 
@@ -509,83 +511,26 @@
     }
 
     // ================= 4. 数据获取与处理 =================
-    async function handlePayload(payload, sourceKey, isManual = false) {
-        if (!payload) return false;
-        let hasUpdate = false;
-        try {
-            if (typeof payload === 'object' && payload.url && typeof payload.url === 'string') {
-                await fetchRemoteConfig(payload.url, isManual);
-                return; // fetchRemoteConfig 会处理结果，这里不好直接返回 hasUpdate，简化处理
-            }
-            if (typeof payload === 'string' && payload.startsWith('http')) {
-                await fetchRemoteConfig(payload, isManual);
-                return;
-            }
-            const data = (typeof payload === 'string') ? JSON.parse(payload) : payload;
-            let latestItem = null;
-            if (Array.isArray(data)) {
-                data.forEach(item => {
-                    if (item.type === 'version' && (!latestItem || compareVersions(item.logic.target_version, latestItem.logic.target_version) > 0)) latestItem = item;
-                    if (processItem(item, isManual)) hasUpdate = true;
-                });
-            } else {
-                if (data.type === 'version') latestItem = data;
-                if (processItem(data, isManual)) hasUpdate = true;
-            }
-
-            if (isManual && !hasUpdate) {
-                const msg = latestItem && latestItem.ui && latestItem.ui.message
-                    ? latestItem.ui.message
-                    : `无法从服务器获取到版本发布详情，您的系统当前版本为 ${CONFIG.getLocalVersion()}。`;
-                const upToDateItem = {
-                    id: 'manual_check_uptodate',
-                    type: 'info',
-                    ui: {
-                        title: '当前已是最新版本',
-                        message: msg,
-                        confirm_text: '确定',
-                        cancel_text: ''
-                    },
-                    action: { type: 'close' },
-                    logic: { interval_hours: 0 }
-                };
-                renderModal(upToDateItem, 'temp_manual_check', null);
-            }
-        } catch (e) {
-            console.error(`[Notification] Error processing payload from ${sourceKey}:`, e);
-        }
-        return hasUpdate;
-    }
-
     async function fetchRemoteConfig(url, isManual = false) {
         try {
             const bustUrl = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
             const res = await fetch(bustUrl, { cache: 'no-store' });
             if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
             const data = await res.json();
+
             let hasUpdate = false;
-            let latestItem = null;
-            if (Array.isArray(data)) {
-                data.forEach(item => {
-                    if (item.type === 'version' && (!latestItem || compareVersions(item.logic.target_version, latestItem.logic.target_version) > 0)) latestItem = item;
-                    if (processItem(item, isManual)) hasUpdate = true;
-                });
-            } else {
-                if (data.type === 'version') latestItem = data;
-                if (processItem(data, isManual)) hasUpdate = true;
-            }
+            const items = Array.isArray(data) ? data : [data];
+            items.forEach(item => {
+                if (processItem(item, isManual)) hasUpdate = true;
+            });
 
             if (isManual && !hasUpdate) {
-                const msg = latestItem && latestItem.ui && latestItem.ui.message
-                    ? latestItem.ui.message
-                    : `无法从服务器获取到版本发布详情，您的系统当前版本为 ${CONFIG.getLocalVersion()}。`;
-                // Construct a temporary item for "Up to date"
                 const upToDateItem = {
                     id: 'manual_check_uptodate',
                     type: 'info', // Will use Success/Check icon based on title match in getStyleConfig
                     ui: {
                         title: '当前已是最新版本',
-                        message: msg,
+                        message: `您的系统当前版本为 ${CONFIG.getLocalVersion()}，已是最新版本。\n如需查看历史版本，请访问 GitHub Releases 页面。`,
                         confirm_text: '确定',
                         cancel_text: ''
                     },
@@ -598,13 +543,11 @@
             console.error('[Notification] Check failed:', e);
             if (isManual) {
                 let errorTitle = '检查更新失败';
-                let errorMessage = '无法连接到更新服务器，请检查网络连接或稍后重试。';
+                let errorMessage = '无法从 GitHub 获取更新信息，请检查网络连接或稍后重试。';
 
                 // 更精确的错误提示
                 if (e.message.includes('404')) {
-                    errorMessage = '当前服务器未发现预设的更新通知文件，且在线更新检查功能已关闭。';
-                } else if (!window.CONFIG || window.CONFIG.disableTelemetry) {
-                    errorMessage = '由于你已在设置或环境变量中禁用了「数据收集与统计」，系统无法自动连接到远程更新服务器。请直接前往 GitHub 发布页面下载最新版本。';
+                    errorMessage = '更新通知文件不存在或暂时不可用，请前往 GitHub Releases 页面查看最新版本。';
                 }
 
                 const errorItem = {
@@ -613,10 +556,10 @@
                     ui: {
                         title: errorTitle,
                         message: errorMessage,
-                        confirm_text: '确定',
+                        confirm_text: '前往 GitHub',
                         cancel_text: ''
                     },
-                    action: { type: 'close' },
+                    action: { type: 'link', url: CONFIG.RELEASES_URL },
                     logic: { interval_hours: 0 }
                 };
                 renderModal(errorItem, 'temp_manual_error', null);
@@ -626,93 +569,11 @@
 
     // ================= 5. 初始化入口 =================
     function init() {
-        if (typeof posthog === 'undefined') {
-            if (!window._ph_retry) window._ph_retry = 0;
-            if (window._ph_retry < 10) {
-                window._ph_retry++;
-                setTimeout(init, 500);
-            }
-            return;
-        }
-
-        posthog.onFeatureFlags(() => {
-            checkUpdates(false);
-        });
+        checkUpdates(false);
     }
 
     async function checkUpdates(isManual = false) {
-        // 如果是手动检查，增加一个主动探测逻辑来判断 PostHog 是否被拦截
-        let adBlocked = !!window._ph_blocked;
-        if (isManual && !adBlocked) {
-            // 如果 posthog 对象看起来还没完全加载，进行一次 fetch 探测
-            if (typeof posthog === 'undefined' || !posthog.__loaded) {
-                try {
-                    await fetch('https://us.i.posthog.com/static/array.js', { mode: 'no-cors', cache: 'no-store' });
-                } catch (e) {
-                    console.warn('[Notification] Proactive AdBlocker detection triggered.');
-                    adBlocked = true;
-                }
-            }
-        }
-
-        // 如果是手动检查，尝试强制刷新 PostHog 配置以获取最新数据
-        if (isManual && typeof posthog !== 'undefined' && !adBlocked) {
-            try { posthog.reloadFeatureFlags(); } catch (e) { console.error('[Notification] Reload flags failed:', e); }
-        }
-
-        // 如果服务没加载，或者被 AdBlocker 拦截，或者配置里明确禁用了，直接弹窗提示
-        if (typeof posthog === 'undefined' || (window.CONFIG && window.CONFIG.disableTelemetry) || adBlocked) {
-            if (isManual) {
-                const message = adBlocked
-                    ? '由于您的浏览器广告拦截插件（AdBlocker）拦截了更新检查服务，无法在线获取最新版本信息。请暂时关闭插件或将 LX Server 地址加入白名单。'
-                    : '由于在线更新检测服务未加载（可能已禁用统计），请前往 GitHub 检查最新版本。';
-
-                const errorItem = {
-                    id: 'manual_check_disabled',
-                    type: 'warning',
-                    ui: {
-                        title: '检查更新受阻',
-                        message: message,
-                        confirm_text: '确定',
-                        cancel_text: ''
-                    },
-                    action: { type: 'close' },
-                    logic: { interval_hours: 0 }
-                };
-                renderModal(errorItem, 'temp_manual_disabled', null);
-            }
-            return;
-        }
-
-        let checked = false;
-        for (const key of CONFIG.PRIORITY_KEYS) {
-            const isEnabled = posthog.isFeatureEnabled(key);
-            if (isEnabled) {
-                const payload = posthog.getFeatureFlagPayload(key);
-                if (payload) {
-                    handlePayload(payload, key, isManual);
-                    checked = true;
-                    return;
-                }
-            }
-        }
-
-        if (isManual && !checked) {
-            // 如果 Feature Flags 里没东西，仅显示提示即可
-            const upToDateItem = {
-                id: 'manual_check_uptodate',
-                type: 'info',
-                ui: {
-                    title: '当前已是最新版本',
-                    message: `无法从服务器获取到版本发布详情，您的系统当前版本为 ${CONFIG.getLocalVersion().replace(/^v+/, 'v')}。`,
-                    confirm_text: '确定',
-                    cancel_text: ''
-                },
-                action: { type: 'close' },
-                logic: { interval_hours: 0 }
-            };
-            renderModal(upToDateItem, 'temp_manual_check', null);
-        }
+        await fetchRemoteConfig(CONFIG.NOTICE_URL, isManual);
     }
 
     // 暴露给全局的方法

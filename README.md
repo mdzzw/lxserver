@@ -71,7 +71,7 @@ LX Music Sync Server 是一个可以自行部署的音乐同步服务。它在 [
 ```yaml
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/mdzzw/lxserver:latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
@@ -98,7 +98,7 @@ docker compose up -d
 docker compose logs -f --tail=100
 ```
 
-也可以将镜像名换成 `ghcr.io/mdzzw/lxserver:latest`。固定版本部署时，把 `latest` 换成镜像仓库实际存在的版本标签。
+镜像由本仓库的 GitHub Actions 构建并发布到 GHCR；固定版本部署时，把 `latest` 换成镜像仓库实际存在的版本标签。
 
 镜像默认将日志写入 `/server/data/logs`，上述 `data` 挂载已包含日志。如需单独保存，增加 `./logs:/server/logs` 挂载，并同时设置 `LOG_PATH: /server/logs`。只挂载 `/server/logs` 不会改变默认日志位置。
 
@@ -119,7 +119,7 @@ docker run -d \
   -e ADMIN_PASSWORD="replace-with-your-admin-password" \
   -e ENABLE_WEBPLAYER_AUTH=true \
   -e WEBPLAYER_PASSWORD="replace-with-your-player-password" \
-  xcq0607/lxserver:latest
+  ghcr.io/mdzzw/lxserver:latest
 ```
 
 Windows PowerShell 用户可以使用上面的 Compose 文件，避免多行命令和路径语法的差异。
@@ -608,7 +608,7 @@ npm run docs:build --prefix docs
 
 ## 数据收集与通知
 
-项目集成了 PostHog 统计及版本、公告通知相关逻辑。可通过 `DISABLE_TELEMETRY=true` 关闭；关闭后也不会收到相应的新版本和公告提示。
+项目集成了 PostHog 匿名统计；版本与公告通知读取本仓库的 `notice/notification.json`，与统计开关无关。可通过 `DISABLE_TELEMETRY=true` 关闭统计，通知检查仍可正常使用。
 
 部署更新和功能变化可手动查看 [更新日志](changelog.md) 与 [Releases](https://github.com/mdzzw/lxserver/releases)。
 

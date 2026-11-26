@@ -19,7 +19,7 @@ Create `compose.yaml` in the directory where you want to keep your data:
 ```yaml
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/mdzzw/lxserver:latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
@@ -44,7 +44,7 @@ docker compose up -d
 docker compose logs -f --tail=100
 ```
 
-The alternative image is `ghcr.io/mdzzw/lxserver:latest`. For a pinned deployment, use a version tag that exists in the image registry.
+The image is built and published to GHCR by this repository's GitHub Actions. For a pinned deployment, use a version tag that exists in the image registry.
 
 The image writes logs to `/server/data/logs` by default, so the data mount already includes logs. To store logs separately, add `./logs:/server/logs` **and** set `LOG_PATH: /server/logs`. Mounting that directory alone does not change the log destination.
 
@@ -65,7 +65,7 @@ docker run -d \
   -e ADMIN_PASSWORD="replace-with-your-admin-password" \
   -e ENABLE_WEBPLAYER_AUTH=true \
   -e WEBPLAYER_PASSWORD="replace-with-your-player-password" \
-  xcq0607/lxserver:latest
+  ghcr.io/mdzzw/lxserver:latest
 ```
 
 On Windows PowerShell, Compose avoids differences in multiline shell syntax and host-path expansion.

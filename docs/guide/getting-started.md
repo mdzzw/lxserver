@@ -19,7 +19,7 @@
 ```yaml
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/mdzzw/lxserver:latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
@@ -46,7 +46,7 @@ docker compose up -d
 docker compose logs -f --tail=100
 ```
 
-也可以将镜像名换成 `ghcr.io/mdzzw/lxserver:latest`。固定版本部署时，把 `latest` 换成镜像仓库实际存在的版本标签。
+镜像由本仓库的 GitHub Actions 构建并发布到 GHCR。固定版本部署时，把 `latest` 换成镜像仓库实际存在的版本标签。
 
 镜像默认将日志写入 `/server/data/logs`，上述 `data` 挂载已包含日志。如需单独保存，增加 `./logs:/server/logs` 挂载，并同时设置 `LOG_PATH: /server/logs`。只挂载 `/server/logs` 不会改变默认日志位置。
 
@@ -67,7 +67,7 @@ docker run -d \
   -e ADMIN_PASSWORD="replace-with-your-admin-password" \
   -e ENABLE_WEBPLAYER_AUTH=true \
   -e WEBPLAYER_PASSWORD="replace-with-your-player-password" \
-  xcq0607/lxserver:latest
+  ghcr.io/mdzzw/lxserver:latest
 ```
 
 Windows PowerShell 用户可以使用上面的 Compose 文件，避免多行命令和路径语法的差异。
