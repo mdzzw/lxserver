@@ -1,0 +1,42 @@
+[
+    {
+        "comment": "=== 欢迎标语 ===",
+        "id": "welcome_slogan_v1",
+        "status": "active",
+        "type": "broadcast",
+        "logic": {
+            "interval_hours": -1
+        },
+        "ui": {
+            "title": "🎉 欢迎使用lxserver",
+            "message": "在这个纯净的音乐世界里，每一秒都是享受。\n祝您听歌愉快！",
+            "confirm_text": "开始探索",
+            "cancel_text": ""
+        },
+        "action": {
+            "type": "close"
+        }
+    },
+    {
+        "comment": "=== 版本更新 v2.2.0 ===",
+        "id": "update_v2_2_0",
+        "status": "active",
+        "type": "version",
+        "logic": {
+            "target_version": "v2.2.0",
+            "operator": "<",
+            "interval_hours": 24
+        },
+        "ui": {
+            "title": "发现新版本 v2.2.0",
+            "date": "2026-11-11",
+            "message": "本次更新带来备份体系、评分系统与后台界面的全面升级：\n1. [新增] 后台仪表盘与明/暗主题: 仪表盘重构为数据看板，新增日志活动、服务与存储、用户与设备、最近告警，并支持明/暗主题一键切换。\n2. [新增] OpenList 备份与统一云端备份: 支持 OpenList 数据备份与恢复，WebDAV / OpenList 可分别选择备份范围，并新增后台「备份管理」统一入口。\n3. [新增] 歌曲评分与 Subsonic 评分歌单: Web 播放器支持 1–5 星评分，Subsonic 生成按星级汇总的虚拟歌单，后台可查看评分与不喜欢数据。\n4. [新增] 聚合搜索升级: 多源关键词联想、分批加载与聚合排序，内置音乐 SDK 接口同步更新。\n5. [新增] 服务器已有歌曲优先播放: 优先使用服务器 music / cache 中的歌曲与本地歌词，Subsonic 可选返回缓存目录歌曲。\n6. [优化] 下载与缓存: 浏览器单曲 4 路分段下载，自动切歌优先使用已完成缓存，缓存清理不再误删 music 文件。\n7. [修复] PWA 下载认证失效、切歌进度未重置、自定义目录索引等多项问题。",
+            "confirm_text": "查看日志",
+            "cancel_text": "稍后提醒"
+        },
+        "action": {
+            "type": "link",
+            "url": "https://github.com/mdzzw/lxserver/releases/tag/v2.2.0"
+        }
+    }
+]

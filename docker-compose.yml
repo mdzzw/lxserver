@@ -1,0 +1,59 @@
+services:
+  lx-sync-server:
+    # 本地构建出的镜像名；如需推送到私有仓库，改成 registry.example.com/lxserver:2.2.0
+    image: lxserver:2.2.0
+    build:
+      context: .
+      args:
+        # 基础镜像加速（国内可用）：
+        # NODE_IMAGE: docker.m.daocloud.io/library/node:22-alpine
+        NPM_REGISTRY: https://registry.npmmirror.com
+        # Alpine apk 源加速（只填域名）：
+        # ALPINE_MIRROR: mirrors.aliyun.com
+    container_name: lx-sync-server
+    restart: unless-stopped
+    ports:
+      - "9527:9527"
+      # Subsonic 独立服务端口：仅当 subsonic.standalone 启用时取消注释
+      # - "4050:4050"
+    volumes:
+      # 配置、快照、用户数据、日志、MIoT 登录态等（DATA_PATH）
+      - ./data:/server/data
+      # 下载歌曲目录（serverCacheLocation=root 时的默认位置，务必持久化）
+      - ./music:/server/music
+      # 播放/歌词缓存目录（默认位置，务必持久化）
+      - ./cache:/server/cache
+    environment:
+      - TZ=Asia/Shanghai
+      - NODE_ENV=production
+      # 通过环境变量覆盖配置，优先级高于 data/config.js
+      # 管理员密码：覆盖默认 123456（强烈建议设置为强密码）
+      # - ADMIN_PASSWORD=your-strong-password
+      # 用户：LX_USER_<用户名>=<密码 或 JSON 配置>
+      # - LX_USER_myuser=mypassword
+      # Subsonic 独立服务
+      # - SUBSONIC_STANDALONE=true
+      # - SUBSONIC_PORT=4050
+      # WebDAV 备份目标（仅填地址与凭据不会启动同步，需显式开启 WEBDAV_ENABLE）
+      # - WEBDAV_ENABLE=true
+      # - WEBDAV_URL=
+      # - WEBDAV_USERNAME=
+      # - WEBDAV_PASSWORD=
+      # 网页播放器鉴权
+      # - ENABLE_WEBPLAYER_AUTH=true
+      # - WEBPLAYER_PASSWORD=<请设置强密码，勿使用默认值>
+      # 其他常用项
+      # - SYNC_INTERVAL=60
+      # - CONFIG_PATH=/server/data/config.js
+      # - SERVER_NAME=My Sync Server
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9527/').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Persist install wizard values so cmd/main can reuse them after restarts.
+
+export PATH=/var/apps/nodejs_v22/target/bin:$PATH
+
+mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
+
+printf '%s\n' "${wizard_port:-9527}" > "${TRIM_PKGVAR}/install.port"
+
+PASS_FILE="${TRIM_PKGVAR}/install.admin_password"
+if [ -n "${wizard_admin_password:-}" ]; then
+  printf '%s' "$wizard_admin_password" > "$PASS_FILE"
+  chmod 600 "$PASS_FILE" 2>/dev/null || true
+else
+  rm -f "$PASS_FILE"
+fi
+
+# Files unpacked from the package may lose their executable bit.
+chmod +x "${TRIM_APPDEST}/public/music/bin/"* 2>/dev/null || true
+chmod +x "${TRIM_APPDEST}/cmd/main" 2>/dev/null || true
+
+exit 0

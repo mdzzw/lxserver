@@ -1,0 +1,209 @@
+#!/bin/bash
+
+# fnOS lifecycle script for lxserver (start / stop / status).
+
+APP_DIR="${TRIM_APPDEST}"
+VAR_DIR="${TRIM_PKGVAR}"
+DATA_DIR="${VAR_DIR}/data"
+LOG_DIR="${VAR_DIR}/logs"
+LOG_FILE="${VAR_DIR}/app.log"
+PID_FILE="${VAR_DIR}/app.pid"
+PORT_FILE="${VAR_DIR}/install.port"
+PASS_FILE="${VAR_DIR}/install.admin_password"
+
+# Package files do not keep their executable bit. Put an executable copy of
+# fpcalc in the app user's own bin dir, which identify.ts finds via PATH.
+mkdir -p "${VAR_DIR}/bin"
+export PATH="${VAR_DIR}/bin:/var/apps/nodejs_v22/target/bin:$PATH"
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+
+# Wizard values are passed to lifecycle scripts as environment variables. The
+# files written by install_callback keep the chosen port across restarts.
+PORT="${wizard_port:-}"
+if [ -z "$PORT" ] && [ -f "$PORT_FILE" ]; then
+  PORT="$(head -n 1 "$PORT_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+PORT="${PORT:-9527}"
+
+ADMIN_PASSWORD="${wizard_admin_password:-}"
+if [ -z "$ADMIN_PASSWORD" ] && [ -f "$PASS_FILE" ]; then
+  ADMIN_PASSWORD="$(cat "$PASS_FILE" 2>/dev/null)"
+fi
+
+# cwd is the persistent var dir: lxserver resolves its music/cache folders
+# against it, and getFpcalcPath() looks up cwd/public/music/bin.
+link_dir() {
+  local link="$1"
+  local target="$2"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    return 0
+  fi
+  ln -sfn "$target" "$link"
+}
+
+if [ -d "${APP_DIR}/public" ]; then
+  link_dir "${VAR_DIR}/public" "${APP_DIR}/public"
+fi
+
+SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}"
+if [ -z "$SHARE_DIR" ] || [ ! -d "$SHARE_DIR" ]; then
+  SHARE_DIR="/var/apps/${TRIM_APPNAME}/share/music"
+fi
+if [ -d "$SHARE_DIR" ]; then
+  link_dir "${VAR_DIR}/music" "$SHARE_DIR"
+  link_dir "${DATA_DIR}/music" "$SHARE_DIR"
+fi
+
+seed_config() {
+  local config_file="${DATA_DIR}/config.js"
+  if [ -f "$config_file" ]; then
+    return 0
+  fi
+  if ! cp "${APP_DIR}/config.js" "$config_file" 2>> "$LOG_FILE"; then
+    log_msg "failed to seed config.js"
+    return 1
+  fi
+  if [ -n "$ADMIN_PASSWORD" ]; then
+    if WIZARD_ADMIN_PASSWORD="$ADMIN_PASSWORD" node -e '
+const fs = require("fs")
+const file = process.argv[1]
+const config = require(file)
+config["admin.password"] = process.env.WIZARD_ADMIN_PASSWORD
+fs.writeFileSync(file, "module.exports = " + JSON.stringify(config, null, 2) + "\n")
+' "$config_file" >> "$LOG_FILE" 2>&1; then
+      log_msg "applied install wizard admin password"
+    else
+      log_msg "failed to apply install wizard admin password, keeping default"
+    fi
+  fi
+  if [ -f "$PASS_FILE" ]; then
+    rm -f "$PASS_FILE"
+  fi
+}
+
+ensure_fpcalc() {
+  local bundled="${APP_DIR}/public/music/bin/fpcalc-linux-x64"
+  local target="${VAR_DIR}/bin/fpcalc"
+  if [ -x "$target" ]; then
+    return 0
+  fi
+  if [ -f "$bundled" ]; then
+    cp -f "$bundled" "$target" 2>> "$LOG_FILE" && chmod +x "$target" 2>/dev/null || true
+  fi
+}
+
+status_app() {
+  if [ ! -f "$PID_FILE" ]; then
+    return 1
+  fi
+  local pid
+  pid="$(head -n 1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$pid" ]; then
+    rm -f "$PID_FILE"
+    return 1
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  return 1
+}
+
+start_app() {
+  if status_app; then
+    return 0
+  fi
+  rm -f "$PID_FILE"
+
+  seed_config || return 1
+  ensure_fpcalc
+
+  # Files unpacked from the package may lose their executable bit.
+  chmod +x "${APP_DIR}/public/music/bin/"* 2>/dev/null || true
+
+  local node_bin
+  node_bin="$(command -v node 2>/dev/null)"
+  if [ -z "$node_bin" ]; then
+    log_msg "node runtime not found in PATH"
+    return 1
+  fi
+
+  cd "$VAR_DIR" || return 1
+  log_msg "starting lxserver on port ${PORT}"
+  nohup env \
+    NODE_ENV=production \
+    PORT="$PORT" \
+    BIND_IP=0.0.0.0 \
+    DATA_PATH="$DATA_DIR" \
+    LOG_PATH="$LOG_DIR" \
+    STATIC_PATH="${APP_DIR}/public" \
+    "$node_bin" "${APP_DIR}/index.js" >> "$LOG_FILE" 2>&1 &
+
+  echo "$!" > "$PID_FILE"
+
+  local i=0
+  while [ "$i" -lt 20 ]; do
+    if ! status_app; then
+      log_msg "lxserver exited during startup, see ${LOG_DIR}"
+      return 1
+    fi
+    if PORT="$PORT" node -e "fetch('http://127.0.0.1:' + process.env.PORT + '/').then(() => process.exit(0)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      log_msg "lxserver is ready"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+
+  log_msg "lxserver did not become ready within 20s"
+  return 1
+}
+
+stop_app() {
+  if ! status_app; then
+    return 0
+  fi
+  local pid
+  pid="$(head -n 1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+  log_msg "stopping lxserver (pid ${pid})"
+  kill -TERM "$pid" 2>/dev/null || true
+
+  local i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 15 ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+
+  if kill -0 "$pid" 2>/dev/null; then
+    log_msg "lxserver did not stop in time, sending SIGKILL"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  return 0
+}
+
+case "$1" in
+  start)
+    start_app
+    exit $?
+    ;;
+  stop)
+    stop_app
+    exit $?
+    ;;
+  status)
+    if status_app; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    echo "Unknown command: $1" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+    exit 1
+    ;;
+esac

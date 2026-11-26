@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>小爱音箱 · 落雪音乐</title>
+  <link rel="icon" href="/music/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/music/assets/fontawesome/css/all.min.css">
+  <link rel="stylesheet" href="/music/css/theme_variables.css">
+  <link rel="stylesheet" href="./app.css">
+  <script>
+    (function () {
+      try {
+        if (new URLSearchParams(location.search).has('embed')) {
+          document.documentElement.classList.add('miot-embed');
+        }
+        var theme = localStorage.getItem('lx_theme') || 'emerald';
+        document.documentElement.setAttribute('data-theme', theme);
+        var appearance = localStorage.getItem('lx_appearance') || 'system';
+        if (appearance === 'light' || appearance === 'dark') {
+          document.documentElement.setAttribute('data-appearance', appearance);
+        }
+        window.addEventListener('storage', function (event) {
+          if (event.key === 'lx_theme' && event.newValue) {
+            document.documentElement.setAttribute('data-theme', event.newValue);
+          }
+          if (event.key === 'lx_appearance') {
+            var mode = event.newValue || 'system';
+            if (mode === 'light' || mode === 'dark') document.documentElement.setAttribute('data-appearance', mode);
+            else document.documentElement.removeAttribute('data-appearance');
+            if (window.updateMiotThemeIcon) window.updateMiotThemeIcon();
+          }
+        });
+      } catch (err) { /* 忽略隐私模式下的存储异常 */ }
+    })();
+  </script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" title="返回落雪音乐">
+      <img class="brand-logo dynamic-logo" src="/music/assets/logo.svg" alt="落雪">
+      <span class="brand-text">
+        <span class="brand-title">落雪 · 小爱音箱</span>
+        <span class="brand-sub">歌曲直接由 lxserver 提供</span>
+      </span>
+    </a>
+    <div class="spacer"></div>
+    <span id="statusBadge" class="badge"><i class="dot"></i><span>未连接</span></span>
+    <button id="themeBtn" class="icon-btn" type="button" title="切换亮 / 暗色" aria-label="切换亮 / 暗色">
+      <i class="fas fa-moon"></i>
+    </button>
+    <button id="refreshBtn" class="btn ghost small" type="button"><i class="fas fa-sync"></i>刷新</button>
+    <a class="btn ghost small back-link" href="/"><i class="fas fa-arrow-left"></i>返回播放器</a>
+    <button id="logoutBtn" class="btn ghost small hidden" type="button"><i class="fas fa-sign-out-alt"></i>退出验证</button>
+  </header>
+
+  <main class="page">
+    <section id="loginPanel" class="card login-card hidden">
+      <div class="login-head">
+        <div class="login-icon"><i class="fas fa-lock"></i></div>
+        <div>
+          <h2>后台验证</h2>
+          <p class="muted">小爱音箱管理接口使用落雪后台密码</p>
+        </div>
+      </div>
+      <div class="field">
+        <label for="adminPassword">管理员密码</label>
+        <input id="adminPassword" type="password" autocomplete="current-password" placeholder="输入落雪后台密码">
+      </div>
+      <button id="adminLoginBtn" class="btn primary block" type="button">连接服务</button>
+      <p class="hint-text">密码只保存在当前浏览器会话，用于调用 /api/miot 管理接口。</p>
+    </section>
+
+    <div id="appPanel" class="hidden">
+      <div class="hero card">
+        <div class="hero-main">
+          <div class="hero-icon"><i class="fas fa-robot"></i></div>
+          <div>
+            <h1>小爱音箱集成</h1>
+            <p class="muted">把落雪的歌单、搜索与本地曲库推送到小爱音箱；扫码登录小米账号后自动同步设备。</p>
+          </div>
+        </div>
+        <div class="hero-meta">
+          <span id="heroEnabled" class="pill">集成已启用</span>
+          <span id="heroAi" class="pill">AI分析关闭</span>
+          <span id="streamBaseUrl" class="muted mono"></span>
+        </div>
+      </div>
+
+      <section id="aiErrorPanel" class="card ai-error-panel hidden">
+        <div class="ai-error-icon"><i class="fas fa-triangle-exclamation"></i></div>
+        <div class="ai-error-body">
+          <div class="ai-error-title">AI分析已自动关闭</div>
+          <div id="aiErrorText" class="ai-error-text"></div>
+          <div id="aiErrorMeta" class="muted"></div>
+          <div class="hint-text">处理完错误后先点“清除错误记录”，再回到运行设置里手动重新打开 AI分析开关。错误也会通过音箱语音提示。</div>
+        </div>
+        <button id="aiClearBtn" class="btn small" type="button"><i class="fas fa-eraser"></i>清除错误记录</button>
+      </section>
+
+      <div class="grid two-col">
+        <section class="card">
+          <div class="card-head">
+            <h2><i class="fas fa-sliders-h"></i>运行设置</h2>
+            <span class="hint">决定从落雪取歌的方式</span>
+          </div>
+          <form id="settingsForm" class="form-grid">
+            <div class="field wide switch">
+              <label for="setEnabled">启用小爱集成</label>
+              <input id="setEnabled" type="checkbox">
+            </div>
+            <div class="field">
+              <label for="setUsername">落雪用户</label>
+              <input id="setUsername" list="lxUserList" placeholder="留空使用公开源 (_open)">
+              <datalist id="lxUserList"></datalist>
+            </div>
+            <div class="field">
+              <label for="setQuality">音质</label>
+              <select id="setQuality">
+                <option value="128k">128k</option>
+                <option value="320k">320k</option>
+                <option value="flac">FLAC</option>
+                <option value="flac24bit">FLAC 24bit</option>
+              </select>
+            </div>
+            <div class="field wide">
+              <label for="setBaseUrl">对外地址（音箱访问）</label>
+              <input id="setBaseUrl" placeholder="留空自动使用局域网地址，如 http://192.168.1.10:9527">
+            </div>
+            <div class="field">
+              <label for="setPoll">对话轮询间隔（秒）</label>
+              <input id="setPoll" type="number" min="1" max="30" step="1">
+            </div>
+            <div class="field">
+              <label for="setDefaultList">默认歌单 ID</label>
+              <input id="setDefaultList" placeholder="default / love / 歌单ID">
+            </div>
+            <div class="switch-grid field wide">
+              <div class="field switch">
+                <label for="setVoice">语音口令监听</label>
+                <input id="setVoice" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setAutoNext">自动下一首</label>
+                <input id="setAutoNext" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setCacheOnPlay">播放时缓存到落雪</label>
+                <input id="setCacheOnPlay" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setVipAutoDownload">VIP 歌曲自动下载</label>
+                <input id="setVipAutoDownload" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setKeepLight">播放中保持音箱灯效</label>
+                <input id="setKeepLight" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setAnnounce">播放前语音播报歌名</label>
+                <input id="setAnnounce" type="checkbox">
+              </div>
+              <div class="field switch">
+                <label for="setAiAnalysis">AI分析（内置AI的音箱可用其他音箱自测）</label>
+                <input id="setAiAnalysis" type="checkbox">
+              </div>
+            </div>
+            <div class="field">
+              <label for="setAiDailyLimit">AI 每日额度（次）</label>
+              <input id="setAiDailyLimit" type="number" min="1" max="200" step="1" value="60">
+            </div>
+            <div class="field">
+              <label for="setAiFailureThreshold">连续失败阈值（次）</label>
+              <input id="setAiFailureThreshold" type="number" min="1" max="10" step="1" value="3">
+            </div>
+            <div class="field">
+              <label for="setAiFailureWindow">失败统计窗口（分钟）</label>
+              <input id="setAiFailureWindow" type="number" min="1" max="60" step="1" value="10">
+            </div>
+            <div class="field wide prompt-field">
+              <div class="prompt-head">
+                <label for="setAiIntentPrompt">意图解析提示词</label>
+                <button type="button" id="resetAiIntentPrompt" class="btn small ghost"><i class="fas fa-rotate-left"></i>恢复默认</button>
+              </div>
+              <textarea id="setAiIntentPrompt" rows="4" maxlength="3000" spellcheck="false" placeholder="留空使用内置默认提示词"></textarea>
+              <div class="field-hint">占位符：<code>{query}</code> 用户原话，<code>{types}</code> 可选歌曲类型，<code>{commands}</code> 由下方“语音”口令列表自动生成的口令表，<code>{examples}</code> 按口令表生成的示例。没有 <code>{commands}</code> 时会自动插入到用户原话之前；没有 <code>{query}</code> 时会在末尾补上用户原话。</div>
+            </div>
+            <div class="field wide prompt-field">
+              <div class="prompt-head">
+                <label for="setAiClassifyPrompt">歌曲分类提示词</label>
+                <button type="button" id="resetAiClassifyPrompt" class="btn small ghost"><i class="fas fa-rotate-left"></i>恢复默认</button>
+              </div>
+              <textarea id="setAiClassifyPrompt" rows="3" maxlength="3000" spellcheck="false" placeholder="留空使用内置默认提示词"></textarea>
+              <div class="field-hint">占位符：<code>{song}</code> 歌名（含歌手），<code>{title}</code> 仅歌名，<code>{singer}</code> 歌手，<code>{types}</code> 可选歌曲类型。缺少歌曲信息或类型时会自动补上。</div>
+            </div>
+            <div class="field wide hint-text">
+              AI分析：一个开关同时控制“自动推歌”和“语音意图解析”。点播单曲时，首次遇到新歌会让小爱判断类型并续播同类；规则口令没命中、且原话与歌曲或播放器相关时，才会把原话按下方“语音”口令表解析成播放口令。天气、新闻、聊天、家电控制等与歌曲无关的话术会在本地直接过滤，不会调用 AI、不消耗额度。内置小爱的音箱可直接使用，其他音箱可先用下方“语音测试”自测。偶发未响应或超时会保持开关开启并累计次数，只在统计窗口内连续达到阈值时才自动关闭；登录或 Token 失效会立即关闭。自动推歌与意图解析共用上面的每日额度（默认 60 次，可调 1–200）。两个提示词留空即用内置默认，修改后点保存立即生效，无需发版。
+            </div>
+            <div class="field wide">
+              <div class="row">
+                <button type="submit" class="btn primary"><i class="fas fa-check"></i>保存设置</button>
+                <span class="muted">修改后立即生效</span>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2><i class="fas fa-user-circle"></i>小米账号</h2>
+            <span class="hint">密码不会保存，仅保留登录令牌</span>
+          </div>
+
+          <div class="tabs" role="tablist">
+            <button class="tab active" type="button" role="tab" data-auth-tab="qrcode"><i class="fas fa-qrcode"></i>扫码登录</button>
+            <button class="tab" type="button" role="tab" data-auth-tab="password"><i class="fas fa-key"></i>密码登录</button>
+            <button class="tab" type="button" role="tab" data-auth-tab="token"><i class="fas fa-link"></i>Token</button>
+          </div>
+
+          <div id="qrPanel" class="auth-panel">
+            <div class="qr-box">
+              <div id="qrPlaceholder" class="qr-placeholder">
+                <i class="fas fa-qrcode"></i>
+                <span>点击下方按钮获取二维码</span>
+              </div>
+              <img id="qrImage" class="qr-image hidden" alt="小米账号登录二维码">
+            </div>
+            <div id="qrStatus" class="qr-status">尚未获取二维码</div>
+            <div class="row center">
+              <button id="qrRefreshBtn" class="btn primary small" type="button"><i class="fas fa-sync"></i>获取 / 刷新二维码</button>
+              <a id="qrLoginLink" class="btn ghost small hidden" href="#" target="_blank" rel="noreferrer"><i class="fas fa-external-link-alt"></i>在浏览器中打开</a>
+            </div>
+            <p class="hint-text">使用米家 App 或小米商城 App 扫码，并在手机上确认登录。二维码有效期较短，过期后请刷新。</p>
+          </div>
+
+          <div id="passwordPanel" class="auth-panel hidden">
+            <div class="field">
+              <label for="miUsername">小米账号</label>
+              <input id="miUsername" autocomplete="username" placeholder="手机号 / 邮箱 / 小米 ID">
+            </div>
+            <div class="field">
+              <label for="miPassword">密码</label>
+              <input id="miPassword" type="password" autocomplete="current-password" placeholder="小米账号密码">
+            </div>
+            <button id="miLoginBtn" class="btn primary block" type="button"><i class="fas fa-sign-in-alt"></i>登录小米账号</button>
+
+            <div id="captchaBox" class="captcha-box hidden">
+              <img id="captchaImage" alt="验证码">
+              <div class="stack" style="flex:1">
+                <input id="captchaInput" placeholder="输入图片验证码">
+                <button id="captchaSubmitBtn" class="btn primary small" type="button">提交验证码</button>
+              </div>
+            </div>
+
+            <div id="verifyBox" class="captcha-box hidden">
+              <div class="stack" style="flex:1">
+                <div id="verifyTip" class="muted">小米账号需要安全验证</div>
+                <a id="verifyLink" target="_blank" rel="noreferrer">打开验证页面</a>
+                <input id="verifyInput" placeholder="输入短信 / 邮箱验证码">
+                <button id="verifySubmitBtn" class="btn primary small" type="button">提交验证码</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="tokenPanel" class="auth-panel hidden">
+            <div class="field">
+              <label for="tokenUserId">userId</label>
+              <input id="tokenUserId" placeholder="小米 userId">
+            </div>
+            <div class="field">
+              <label for="tokenServiceToken">serviceToken</label>
+              <input id="tokenServiceToken" placeholder="从 App 抓取的 serviceToken">
+            </div>
+            <div class="field">
+              <label for="tokenSsecurity">ssecurity</label>
+              <input id="tokenSsecurity" placeholder="可选">
+            </div>
+            <button id="tokenLoginBtn" class="btn primary block" type="button"><i class="fas fa-link"></i>使用 Token 登录</button>
+          </div>
+
+          <div class="divider"></div>
+          <div class="card-subhead">
+            <span>已登录账号</span>
+            <span class="spacer"></span>
+            <span class="muted">token 过期前会自动续期</span>
+          </div>
+          <div id="accountList" class="list"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><i class="fas fa-volume-up"></i>设备</h2>
+          <span class="hint" id="deviceHint">勾选托管后可被语音 / 页面控制</span>
+        </div>
+        <div id="deviceList" class="list"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><i class="fas fa-play-circle"></i>播放</h2>
+          <span class="hint" id="currentDeviceLabel">未选择设备</span>
+        </div>
+        <div class="grid playback-grid">
+          <div class="stack">
+            <div class="row">
+              <select id="playlistSelect" style="flex:1"></select>
+              <button id="refreshPlaylistsBtn" class="btn ghost small" type="button"><i class="fas fa-sync"></i>刷新歌单</button>
+              <button id="playPlaylistBtn" class="btn primary" type="button"><i class="fas fa-play"></i>播放歌单</button>
+            </div>
+            <div class="row">
+              <input id="searchInput" style="flex:1" placeholder="搜索歌曲 / 歌手，从落雪自定义音源取链接">
+              <button id="searchBtn" class="btn secondary" type="button"><i class="fas fa-search"></i>搜索</button>
+            </div>
+            <div id="searchResults" class="list search-results"></div>
+            <div class="row">
+              <span class="muted">播放模式</span>
+              <select id="modeSelect">
+                <option value="order">顺序播放</option>
+                <option value="loop">列表循环</option>
+                <option value="single">单曲循环</option>
+                <option value="singlePlay">单曲播放</option>
+                <option value="shuffle">随机播放</option>
+              </select>
+              <button id="favoriteBtn" class="btn ghost small" type="button"><i class="fas fa-heart"></i>收藏当前</button>
+              <select id="saveToListSelect" style="max-width: 170px" title="收藏目标歌单"></select>
+              <button id="saveToListBtn" class="btn ghost small" type="button"><i class="fas fa-folder-plus"></i>收藏到</button>
+            </div>
+          </div>
+
+          <div class="playback">
+            <div>
+              <div id="nowSong" class="song">暂无播放</div>
+              <div id="nowArtist" class="artist">选择歌单或搜索歌曲开始</div>
+            </div>
+            <div class="progress"><div id="progressBar"></div></div>
+            <div class="status-line">
+              <span id="playStatus" class="pill">idle</span>
+              <span id="playTime" class="mono">0:00 / 0:00</span>
+              <span id="playListName" class="muted"></span>
+            </div>
+            <div class="controls">
+              <button id="prevBtn" class="btn small" type="button"><i class="fas fa-backward"></i>上一首</button>
+              <button id="pauseBtn" class="btn small" type="button"><i class="fas fa-pause"></i>暂停</button>
+              <button id="resumeBtn" class="btn small primary" type="button"><i class="fas fa-play"></i>继续</button>
+              <button id="nextBtn" class="btn small" type="button">下一首<i class="fas fa-forward"></i></button>
+              <button id="stopBtn" class="btn small danger" type="button"><i class="fas fa-stop"></i>停止</button>
+            </div>
+            <div class="volume-row">
+              <span class="muted">音量</span>
+              <input id="volumeRange" type="range" min="0" max="100" step="1" value="0">
+              <span id="volumeLabel" class="mono">-</span>
+              <button id="volumeSyncBtn" class="btn ghost small" type="button">回读</button>
+            </div>
+            <div class="muted" id="playbackError"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2><i class="fas fa-microphone"></i>语音</h2>
+          <span class="hint">轮询小爱对话记录并执行口令</span>
+          <span class="spacer"></span>
+          <button id="refreshVoiceBtn" class="btn ghost small" type="button"><i class="fas fa-sync"></i>刷新日志</button>
+        </div>
+        <div class="grid two-col">
+          <div class="stack">
+            <select id="voiceDeviceSelect"></select>
+            <div class="row">
+              <input id="voiceTestInput" style="flex:1" placeholder="例如：播放歌单 默认歌单 / 下一首 / 音量调到30">
+              <button id="voiceDryBtn" class="btn small" type="button">匹配测试</button>
+              <button id="voiceExecBtn" class="btn small primary" type="button">实际执行</button>
+            </div>
+            <pre id="voiceTestResult" class="log">等待测试...</pre>
+            <div class="row">
+              <span class="muted">设备对话记录</span>
+            </div>
+            <pre id="voiceLog" class="log">暂无记录</pre>
+          </div>
+
+          <div class="stack">
+            <div class="row">
+              <span class="muted">口令表</span>
+              <span class="spacer"></span>
+              <button id="addCommandBtn" class="btn small secondary" type="button"><i class="fas fa-plus"></i>添加口令</button>
+              <button id="saveCommandsBtn" class="btn small primary" type="button">保存开关</button>
+              <button id="resetCommandsBtn" class="btn small ghost" type="button">恢复默认</button>
+            </div>
+            <div id="commandEditor" class="command-editor hidden">
+              <div class="command-editor-head" id="commandEditorTitle">添加自定义口令</div>
+              <div class="field">
+                <label for="cmdType">口令类型</label>
+                <select id="cmdType"></select>
+              </div>
+              <div class="field">
+                <label for="cmdKeywords">关键词</label>
+                <input id="cmdKeywords" placeholder="多个关键词用逗号分隔，例如：播放我的歌单, 放我的歌单">
+              </div>
+              <div class="field" id="cmdParamField">
+                <label for="cmdParamSelect">参数</label>
+                <select id="cmdParamSelect"></select>
+                <input id="cmdParamInput" class="hidden" placeholder="参数（一般留空）">
+              </div>
+              <div class="field switch">
+                <label for="cmdEnabled">启用</label>
+                <input id="cmdEnabled" type="checkbox" checked>
+              </div>
+              <div class="row">
+                <button id="cmdSaveBtn" class="btn small primary" type="button"><i class="fas fa-check"></i>保存口令</button>
+                <button id="cmdCancelBtn" class="btn small ghost" type="button">取消</button>
+              </div>
+              <p id="cmdHint" class="hint-text"></p>
+            </div>
+            <div id="commandList" class="list" style="max-height:420px;overflow:auto"></div>
+          </div>
+        </div>
+      </section>
+
+      <footer>落雪音乐 · 小爱音箱集成 · <span class="mono" id="footerStream"></span></footer>
+    </div>
+  </main>
+
+  <div id="toast"></div>
+  <script src="./app.js"></script>
+</body>
+</html>

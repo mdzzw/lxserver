@@ -1,0 +1,203 @@
+import os from 'node:os'
+import type http from 'node:http'
+import { Readable } from 'node:stream'
+import { serveCacheFile } from '@/server/music/fileCache'
+import { serveLocalTrack } from '@/server/music/subsonicLocal'
+import { randomToken } from './crypto'
+import { miotLog } from './log'
+import { resolveSongSource, warmSongCache, warmVipDownload, type ResolvedSongSource } from './resolver'
+import type { MiotSong, MiotStreamTicket } from './types'
+
+const TICKET_TTL_MS = 3 * 3600 * 1000
+const CLEANUP_INTERVAL_MS = 10 * 60 * 1000
+const STREAM_PREFIX = '/api/miot/stream/'
+
+const tickets = new Map<string, MiotStreamTicket>()
+let lastExternalHost = ''
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [token, ticket] of tickets) {
+    if (ticket.expiresAt <= now) tickets.delete(token)
+  }
+}, CLEANUP_INTERVAL_MS).unref()
+
+const isLocalHost = (host: string): boolean => {
+  const hostname = host.split(':')[0].replace(/^\[|\]$/g, '').toLowerCase()
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0'
+}
+
+export const recordExternalHost = (host: string | undefined): void => {
+  if (host && !isLocalHost(host)) lastExternalHost = host
+}
+
+const lanAddress = (): string => {
+  const interfaces = os.networkInterfaces()
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv4' && !entry.internal) return entry.address
+    }
+  }
+  return '127.0.0.1'
+}
+
+export const getStreamBaseUrl = (configuredBaseUrl: string): string => {
+  const configured = configuredBaseUrl.trim()
+  if (configured) return configured.replace(/\/+$/, '')
+  if (lastExternalHost) return `http://${lastExternalHost}`
+  const port = Number((global.lx.config as any).port) || 9527
+  return `http://${lanAddress()}:${port}`
+}
+
+const streamExtension = (resolved: ResolvedSongSource): string => {
+  let ext = ''
+  if (resolved.kind === 'local') ext = resolved.localTrack?.suffix ?? ''
+  else if (resolved.kind === 'cache') ext = (resolved.filename ?? '').split('.').pop() ?? ''
+  else if (resolved.remoteUrl) {
+    try {
+      ext = new URL(resolved.remoteUrl).pathname.split('.').pop() ?? ''
+    } catch { /* default below */ }
+  }
+  ext = ext.toLowerCase()
+  return /^[a-z0-9]{1,5}$/.test(ext) ? ext : 'mp3'
+}
+
+export const createStreamUrl = async (
+  accountId: string,
+  deviceId: string,
+  song: MiotSong,
+  username: string,
+  quality: string,
+  options: { publicBaseUrl: string; cacheOnPlay: boolean; vipAutoDownload: boolean },
+): Promise<string | null> => {
+  const resolved = await resolveSongSource(song, username, quality)
+  if (!resolved) return null
+
+  if (resolved.kind === 'remote') {
+    // 歌单同步数据可能不带 vip 字段：无法确认是免费歌曲时按 VIP 处理，避免漏下载。
+    if (options.vipAutoDownload && song.vip !== false) {
+      warmVipDownload(song, username, resolved)
+    } else if (options.cacheOnPlay) {
+      warmSongCache(song, username, resolved)
+    }
+  }
+
+  const token = randomToken(18)
+  const now = Date.now()
+  tickets.set(token, {
+    token,
+    accountId,
+    deviceId,
+    song,
+    username,
+    quality: resolved.quality,
+    kind: resolved.kind,
+    localTrack: resolved.localTrack,
+    filename: resolved.filename,
+    folder: resolved.folder,
+    remoteUrl: resolved.remoteUrl,
+    createdAt: now,
+    expiresAt: now + TICKET_TTL_MS,
+    lastAccessAt: now,
+  })
+  miotLog.info(`[MIoT] stream ticket ${resolved.kind} "${song.name}" device=${deviceId} quality=${resolved.quality}`)
+  return `${getStreamBaseUrl(options.publicBaseUrl)}${STREAM_PREFIX}${token}.${streamExtension(resolved)}`
+}
+
+const proxyRemote = async (req: http.IncomingMessage, res: http.ServerResponse, remoteUrl: string): Promise<void> => {
+  const headers: Record<string, string> = {
+    'User-Agent': 'LX-Music-MIoT/2.2',
+    'Accept': '*/*',
+  }
+  if (req.headers.range) headers.Range = req.headers.range
+
+  const controller = new AbortController()
+  res.once('close', () => controller.abort())
+
+  let upstream: Response
+  try {
+    upstream = await fetch(remoteUrl, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'follow', signal: controller.signal })
+  } catch (err: any) {
+    miotLog.warn(`[MIoT] stream upstream fetch failed: ${err?.message || err}`)
+    if (!res.headersSent) res.writeHead(502)
+    res.end()
+    return
+  }
+
+  res.statusCode = upstream.status
+  const contentType = upstream.headers.get('content-type')
+  if (contentType) res.setHeader('Content-Type', contentType)
+  const contentLength = upstream.headers.get('content-length')
+  if (contentLength) res.setHeader('Content-Length', contentLength)
+  const contentRange = upstream.headers.get('content-range')
+  if (contentRange) res.setHeader('Content-Range', contentRange)
+  res.setHeader('Accept-Ranges', 'bytes')
+
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end()
+    return
+  }
+
+  const stream = Readable.fromWeb(upstream.body as any)
+  stream.on('error', () => res.destroy())
+  res.once('close', () => stream.destroy())
+  stream.pipe(res)
+}
+
+export const handleMiotStream = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> => {
+  const pathname = (req.url ?? '').split('?')[0]
+  if (!pathname.startsWith(STREAM_PREFIX)) return false
+
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', '*')
+  res.setHeader('Cache-Control', 'no-store')
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204)
+    res.end()
+    return true
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405)
+    res.end()
+    return true
+  }
+
+  const token = pathname.slice(STREAM_PREFIX.length).split('.')[0]
+  const ticket = tickets.get(token)
+  if (!ticket) {
+    res.writeHead(404)
+    res.end('stream ticket not found')
+    return true
+  }
+  if (ticket.expiresAt <= Date.now()) {
+    tickets.delete(token)
+    res.writeHead(410)
+    res.end('stream ticket expired')
+    return true
+  }
+  ticket.lastAccessAt = Date.now()
+
+  try {
+    if (ticket.kind === 'local' && ticket.localTrack) {
+      serveLocalTrack(req, res, ticket.localTrack, false)
+      return true
+    }
+    if (ticket.kind === 'cache' && ticket.filename) {
+      serveCacheFile(req, res, ticket.filename, ticket.username || undefined, ticket.folder)
+      return true
+    }
+    if (ticket.kind === 'remote' && ticket.remoteUrl) {
+      await proxyRemote(req, res, ticket.remoteUrl)
+      return true
+    }
+    res.writeHead(500)
+    res.end('invalid stream ticket')
+  } catch (err: any) {
+    miotLog.warn(`[MIoT] stream error: ${err?.message || err}`)
+    if (!res.headersSent) res.writeHead(500)
+    res.end()
+  }
+  return true
+}
