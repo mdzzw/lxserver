@@ -11,6 +11,7 @@ env:
 jobs:
   build_and_push:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
@@ -96,9 +97,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          # Enable multi-platform build
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # 32 位 arm/v7 在 QEMU 下安装依赖过慢，仅构建 amd64 与 arm64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha
