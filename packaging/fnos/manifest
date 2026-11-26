@@ -5,7 +5,7 @@ desc=落雪音乐同步服务器：多用户歌单同步、音源管理、本地
 source=thirdparty
 platform=x86
 
-maintainer=XCQ
+maintainer=mdzzw
 maintainer_url=https://github.com/mdzzw/lxserver
 
 os_min_version=1.1.3100
