@@ -1,6 +1,6 @@
 import { LIST_IDS } from '@/constants'
 import { getUserSpace } from '@/user'
-import { openLibraryUser } from './resolver'
+import { openLibraryUser } from '@/server/music/playbackFallback'
 import type { MiotPlaylistInfo, MiotSong } from './types'
 
 export interface LoadedPlaylist {

@@ -111,8 +111,17 @@
       headers['Content-Type'] = 'application/json'
       body = JSON.stringify(body)
     }
-    const response = await fetch(path, { ...options, headers, body })
-    const text = await response.text()
+    // 云端/设备接口可能长时间无响应，超时中止避免请求堆积拖慢页面
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), options.timeout || 20000)
+    let response, text
+    try {
+      response = await fetch(path, { ...options, headers, body, signal: controller.signal })
+      text = await response.text()
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new Error('请求超时，请稍后重试')
+      throw err
+    } finally { clearTimeout(timer) }
     let data
     try { data = text ? JSON.parse(text) : {} } catch { data = { success: response.ok, message: text } }
     if (response.status === 401) {
@@ -144,23 +153,30 @@
     state.timers = []
   }
 
+  const inFlight = new Set()
+  const poll = (key, fn) => {
+    if (inFlight.has(key)) return
+    inFlight.add(key)
+    void Promise.resolve().then(fn).catch(() => {}).finally(() => inFlight.delete(key))
+  }
+
   const startTimers = () => {
     stopTimers()
     state.timers.push(setInterval(() => {
       if (document.hidden) return
-      void refreshPlayback().catch(() => {})
+      poll('playback', refreshPlayback)
     }, 5000))
     state.timers.push(setInterval(() => {
       if (document.hidden) return
-      void refreshDevices(false).catch(() => {})
+      poll('devices', () => refreshDevices(false))
     }, 15000))
     state.timers.push(setInterval(() => {
       if (document.hidden) return
-      void refreshVoiceLog().catch(() => {})
+      poll('voice', refreshVoiceLog)
     }, 15000))
     state.timers.push(setInterval(() => {
       if (document.hidden) return
-      void refreshAi().catch(() => {})
+      poll('ai', refreshAi)
     }, 15000))
   }
 
@@ -803,7 +819,9 @@
     applyPlayback(data.playback)
   }
 
-  const playerAction = async (action, value, extra = {}) => {
+  const playerAction = async (action, value, extra = {}, button) => {
+    if (button?.disabled) return null
+    if (button) button.disabled = true
     try {
       const target = requireTarget()
       const data = await api('/api/miot/player', { method: 'POST', body: { ...target, action, value, ...extra } })
@@ -814,14 +832,15 @@
       else if (!data.success) toast((data.playback && data.playback.error) || '操作未成功', 'error')
       return data
     } catch (err) { toast(err.message, 'error'); return null }
+    finally { if (button) button.disabled = false }
   }
 
-  const saveCurrentToList = async () => {
+  const saveCurrentToList = async button => {
     const select = $('saveToListSelect')
     const listId = select.value
     if (!listId) { toast('请选择目标歌单', 'error'); return }
     const listName = state.playlists.find(list => list.id === listId)?.name || listId
-    const data = await playerAction('add-to-list', undefined, { listId })
+    const data = await playerAction('add-to-list', undefined, { listId }, button)
     if (!data) return
     if (data.result === 'added') {
       toast(`已收藏到 ${listName}`, 'ok')
@@ -1180,16 +1199,16 @@
     $('searchBtn').addEventListener('click', search)
     $('searchInput').addEventListener('keydown', event => { if (event.key === 'Enter') search() })
     $('searchResults').addEventListener('click', handleSearchClick)
-    $('modeSelect').addEventListener('change', () => playerAction('mode', $('modeSelect').value))
+    $('modeSelect').addEventListener('change', event => playerAction('mode', event.target.value, {}, event.target))
 
-    $('prevBtn').addEventListener('click', () => playerAction('previous'))
-    $('pauseBtn').addEventListener('click', () => playerAction('pause'))
-    $('resumeBtn').addEventListener('click', () => playerAction('resume'))
-    $('nextBtn').addEventListener('click', () => playerAction('next'))
-    $('stopBtn').addEventListener('click', () => playerAction('stop'))
-    $('favoriteBtn').addEventListener('click', () => playerAction('favorite', 'add'))
-    $('saveToListBtn').addEventListener('click', () => void saveCurrentToList())
-    $('volumeSyncBtn').addEventListener('click', () => playerAction('sync-volume'))
+    $('prevBtn').addEventListener('click', event => playerAction('previous', undefined, {}, event.currentTarget))
+    $('pauseBtn').addEventListener('click', event => playerAction('pause', undefined, {}, event.currentTarget))
+    $('resumeBtn').addEventListener('click', event => playerAction('resume', undefined, {}, event.currentTarget))
+    $('nextBtn').addEventListener('click', event => playerAction('next', undefined, {}, event.currentTarget))
+    $('stopBtn').addEventListener('click', event => playerAction('stop', undefined, {}, event.currentTarget))
+    $('favoriteBtn').addEventListener('click', event => playerAction('favorite', 'add', {}, event.currentTarget))
+    $('saveToListBtn').addEventListener('click', event => void saveCurrentToList(event.currentTarget))
+    $('volumeSyncBtn').addEventListener('click', event => playerAction('sync-volume', undefined, {}, event.currentTarget))
 
     const volume = $('volumeRange')
     volume.addEventListener('pointerdown', () => { state.draggingVolume = true })

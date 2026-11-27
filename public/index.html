@@ -958,6 +958,53 @@
                             </div>
                         </div>
 
+                        <!-- 播放兜底竞速卡片 -->
+                        <div class="config-card glass">
+                            <div class="config-card-header">
+                                <div class="tone-fill-info config-card-icon">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h3 class="config-card-title">播放兜底竞速</h3>
+                                    <p class="config-card-desc">小爱语音与落雪网页共用：解析失败时错峰多路竞速、自动换源降品</p>
+                                </div>
+                            </div>
+                            <div class="config-card-body">
+                                <div class="config-field">
+                                    <label class="config-label">最大并发路数</label>
+                                    <input type="number" name="playback.fallback.maxConcurrency" class="form-input config-input"
+                                        min="1" max="4" step="1" placeholder="2" />
+                                    <small class="config-hint">同时在途的解析路数（1-4），建议 2</small>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">错峰间隔 (ms)</label>
+                                    <input type="number" name="playback.fallback.staggerMs" class="form-input config-input"
+                                        min="0" max="10000" step="100" placeholder="700" />
+                                    <small class="config-hint">后续候选的启动间隔；某一路失败时会立即补位，不再等待</small>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">基础探测超时 (ms)</label>
+                                    <input type="number" name="playback.fallback.probeTimeoutMs" class="form-input config-input"
+                                        min="500" max="15000" step="100" placeholder="2000" />
+                                    <small class="config-hint">解析出链接后的可达性探测超时，超时即视为失败并继续换源/降品</small>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">深度探测超时 (ms)</label>
+                                    <input type="number" name="playback.fallback.deepProbeTimeoutMs" class="form-input config-input"
+                                        min="500" max="20000" step="100" placeholder="3000" />
+                                    <small class="config-hint">文件体积可疑时额外读取音频头核对时长的超时</small>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">成功等待窗口 (ms)</label>
+                                    <input type="number" name="playback.fallback.successWaitMs" class="form-input config-input"
+                                        min="0" max="5000" step="50" placeholder="400" />
+                                    <small class="config-hint">首路探测通过后，仅在仍有其它候选在途时等待该窗口，多路成功则选择音质最高的链接</small>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- 自定义歌曲目录卡片 -->
                         <div class="config-card glass">
                             <div class="config-card-header">

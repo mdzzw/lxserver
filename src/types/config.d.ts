@@ -274,6 +274,31 @@ declare namespace LX {
     'player.password'?: string
 
     /**
+     * 播放失败兜底竞速：同时在途的解析路数
+     */
+    'playback.fallback.maxConcurrency'?: number
+
+    /**
+     * 播放失败兜底竞速：后续候选的错峰启动间隔（毫秒）
+     */
+    'playback.fallback.staggerMs'?: number
+
+    /**
+     * 播放失败兜底竞速：基础可达性探测超时（毫秒）
+     */
+    'playback.fallback.probeTimeoutMs'?: number
+
+    /**
+     * 播放失败兜底竞速：可疑体积的深度时长探测超时（毫秒）
+     */
+    'playback.fallback.deepProbeTimeoutMs'?: number
+
+    /**
+     * 播放失败兜底竞速：首个成功后等待其它在途候选的择优窗口（毫秒）
+     */
+    'playback.fallback.successWaitMs'?: number
+
+    /**
      * 是否启用自定义歌曲目录
      */
     'user.enableCustomMusicDir'?: boolean

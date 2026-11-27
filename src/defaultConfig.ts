@@ -78,6 +78,13 @@ const config: LX.Config = {
   'player.enableAuth': false,
   'player.password': '123456',
 
+  // 播放失败兜底竞速（小爱语音与落雪网页共用同一套规则）
+  'playback.fallback.maxConcurrency': 2, // 同时在途的解析路数
+  'playback.fallback.staggerMs': 700, // 后续候选的错峰启动间隔（毫秒）
+  'playback.fallback.probeTimeoutMs': 2000, // 基础可达性探测超时（毫秒）
+  'playback.fallback.deepProbeTimeoutMs': 3000, // 可疑体积的深度时长探测超时（毫秒）
+  'playback.fallback.successWaitMs': 400, // 首个成功后等待其它在途候选的择优窗口（毫秒）
+
   // 代理配置
   'proxy.all.enabled': false,
   'proxy.all.address': '',

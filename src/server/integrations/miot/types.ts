@@ -180,8 +180,11 @@ export interface MiotDevicePlayState {
   hasPosition: boolean
 }
 
+/** timeout 表示云端未拿到设备回执（3012），不能据此判定音源不可播放 */
+export type MiotPlayCommandResult = 'ok' | 'timeout' | 'failed'
+
 export interface MiotDeviceController {
-  playUrl(accountId: string, deviceId: string, url: string, meta: { title: string; artist?: string }): Promise<boolean>
+  playUrl(accountId: string, deviceId: string, url: string, meta: { title: string; artist?: string }): Promise<MiotPlayCommandResult>
   pause(accountId: string, deviceId: string): Promise<'paused' | 'stopped' | 'failed'>
   resume(accountId: string, deviceId: string): Promise<boolean>
   stop(accountId: string, deviceId: string): Promise<boolean>

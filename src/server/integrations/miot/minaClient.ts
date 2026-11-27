@@ -22,12 +22,14 @@ import type {
   NlpResultData,
   UbusResponse,
 } from './models'
-import type { MiotTokenInfo } from './types'
+import type { MiotPlayCommandResult, MiotTokenInfo } from './types'
 
 const DEFAULT_MUSIC_AUDIO_ID = '1732418460076477549'
 const MUSIC_CP_ID = '355454500'
 
 const PLAY_STATUS_PLAYING = 1
+/** 云端“远程控制超时”：设备可能已收到指令，不能据此判定播放失败 */
+const CONTROL_TIMEOUT_CODE = 3012
 const PAUSE_VERIFY_ATTEMPTS = 2
 const PAUSE_VERIFY_DELAY_MS = 700
 
@@ -149,17 +151,17 @@ export class MinaHTTPClient {
     hardware = '',
     keepLight = false,
     current?: () => boolean,
-  ): Promise<boolean> {
+  ): Promise<MiotPlayCommandResult> {
     const useMusicAPI = hardware ? needUsePlayMusicAPI(hardware) : false
     miotLog.info(`[MIoT] play device=${deviceId} hardware=${hardware} musicAPI=${useMusicAPI} keepLight=${keepLight} url=${url.slice(0, 160)}`)
     if (useMusicAPI) return this.playByMusicURL(deviceId, url, keepLight, current)
     return this.playURL(deviceId, url, keepLight, current)
   }
 
-  async playURL(deviceId: string, url: string, keepLight = false, current?: () => boolean): Promise<boolean> {
+  async playURL(deviceId: string, url: string, keepLight = false, current?: () => boolean): Promise<MiotPlayCommandResult> {
     const message = { url, type: keepLight ? 1 : 2, media: 'app_ios' }
-    const result = await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message, 'play-url', current)
-    return this.isDeviceResultOK(result, 'player_play_url')
+    const result = await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message, 'play-url', current, true)
+    return this.evaluatePlayResult(result, 'player_play_url')
   }
 
   async playByMusicURL(
@@ -168,7 +170,7 @@ export class MinaHTTPClient {
     keepLight = false,
     current?: () => boolean,
     audioId = DEFAULT_MUSIC_AUDIO_ID,
-  ): Promise<boolean> {
+  ): Promise<MiotPlayCommandResult> {
     const music = {
       payload: {
         audio_type: keepLight ? 'MUSIC' : '',
@@ -197,8 +199,8 @@ export class MinaHTTPClient {
       startaudioid: audioId,
       music: JSON.stringify(music),
     }
-    const result = await this.ubusRequest(deviceId, 'player_play_music', 'mediaplayer', message, 'play-music', current)
-    return this.isDeviceResultOK(result, 'player_play_music')
+    const result = await this.ubusRequest(deviceId, 'player_play_music', 'mediaplayer', message, 'play-music', current, true)
+    return this.evaluatePlayResult(result, 'player_play_music')
   }
 
   private async playerOperation(deviceId: string, action: 'play' | 'pause' | 'stop', current?: () => boolean): Promise<boolean> {
@@ -478,6 +480,57 @@ export class MinaHTTPClient {
     }
     if (logLabel) miotLog.info(`[MIoT] ${logLabel} ubus ok device=${deviceId} data=${summarize(result.data)}`)
     return result
+  }
+
+  private deviceResultCode(result: UbusResponse | null): number {
+    const data = result?.data
+    if (!data || typeof data !== 'object') return 0
+    let value: unknown = (data as Record<string, unknown>).device_data ?? data
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value)
+      } catch {
+        return 0
+      }
+    }
+    if (!value || typeof value !== 'object') return 0
+    const code = Number((value as Record<string, unknown>).code)
+    return Number.isFinite(code) ? code : 0
+  }
+
+  /**
+   * 播放指令有三种结果：ok 明确成功；failed 明确失败；timeout 云端没拿到设备回执（3012 等）。
+   * timeout 时设备可能已经开始播放，必须交给播放器回读/重发，不能当作音源不可用。
+   */
+  private evaluatePlayResult(result: UbusResponse | null, action: string): MiotPlayCommandResult {
+    if (!result) {
+      miotLog.warn(`[MIoT] ${action} 未收到云端回执，按控制通道超时处理`)
+      return 'timeout'
+    }
+    const deviceCode = this.deviceResultCode(result)
+    if (result.code !== 0) {
+      const detail = `${result.message ?? ''} ${summarize(result.data, 200)}`
+      if (deviceCode === CONTROL_TIMEOUT_CODE || /远程控制超时|3012/.test(detail)) {
+        miotLog.warn(`[MIoT] ${action} 控制回执超时（${deviceCode || CONTROL_TIMEOUT_CODE}），设备可能已执行`)
+        return 'timeout'
+      }
+      // 101 表示 ubus 无法确认设备执行结果，同样不能据此判定音源失败
+      if (result.code === 101) {
+        miotLog.warn(`[MIoT] ${action} 云端无法确认设备回执（code=101），按控制通道超时处理`)
+        return 'timeout'
+      }
+      miotLog.warn(`[MIoT] ${action} 播放控制失败 code=${result.code}`)
+      return 'failed'
+    }
+    if (deviceCode !== 0) {
+      if (deviceCode === CONTROL_TIMEOUT_CODE) {
+        miotLog.warn(`[MIoT] ${action} 设备回执超时（3012），设备可能已执行`)
+        return 'timeout'
+      }
+      miotLog.warn(`[MIoT] ${action} 设备拒绝播放 code=${deviceCode}`)
+      return 'failed'
+    }
+    return 'ok'
   }
 
   private isDeviceResultOK(result: UbusResponse | null, action: string): boolean {

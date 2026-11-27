@@ -670,7 +670,10 @@ const needsQualityCorrection = (quality: string | undefined, container: string) 
     !!quality && losslessQualitySet.has(quality) && (container === 'mp3' || container === 'ogg')
 )
 
-export const parseDurationSeconds = (value: unknown): number => {
+export /** 只有确认时长低于该值的音频才视为试听/截断；真实短儿歌达到该值仍照常播放与缓存。 */
+const MIN_PLAYABLE_AUDIO_SECONDS = 10
+
+const parseDurationSeconds = (value: unknown): number => {
     if (typeof value === 'number' && Number.isFinite(value)) {
         return value > 10000 ? Math.round(value / 1000) : Math.round(value)
     }
@@ -1747,13 +1750,11 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                 if (!fileName) continue
                 const filePath = path.join(dir, fileName)
                 if (fs.existsSync(filePath)) {
-                    // [防投毒] 如果已知期望时长 > 60s，且缓存记录的时长/文件大小明显属于试听片段，忽略并清理脏缓存
-                    const expectedSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
-                    if (expectedSec > 60 && !isLyricCheck) {
+                    // [防投毒] 目录标注的 interval 经常不准（短儿歌尤甚），只有确认缓存文件时长低于 10s
+                    // 才视为试听/截断并清理；不再按时长比例或体积误删真实短曲
+                    if (!isLyricCheck) {
                         const cachedDurSec = parseDurationSeconds(cached.interval)
-                        const isCachedTeaser = (cachedDurSec > 0 && (cachedDurSec < 60 || cachedDurSec < expectedSec * 0.5)) ||
-                            (cached.size && cached.size < 750 * 1024 && expectedSec > 120 && cached.quality === '128k')
-                        if (isCachedTeaser) {
+                        if (cachedDurSec > 0 && cachedDurSec < MIN_PLAYABLE_AUDIO_SECONDS) {
                             console.warn(`[文件缓存] 命中损坏的试听片段缓存 (${cached.filename})，予以忽略并剔除`)
                             indexManager.remove(normalizedUsername, id, folder, cached.quality)
                             try { fs.unlinkSync(filePath) } catch { }
@@ -1827,17 +1828,12 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                     const fileName = cachedAny.filename
                     const filePath = path.join(dir, fileName)
                     if (fs.existsSync(filePath)) {
-                        const expectedSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
-                        if (expectedSec > 60) {
-                            const cachedDurSec = parseDurationSeconds(cachedAny.interval)
-                            const isCachedTeaser = (cachedDurSec > 0 && (cachedDurSec < 60 || cachedDurSec < expectedSec * 0.5)) ||
-                                (cachedAny.size && cachedAny.size < 750 * 1024 && expectedSec > 120 && cachedAny.quality === '128k')
-                            if (isCachedTeaser) {
-                                console.warn(`[文件缓存] 命中损坏的试听片段缓存 (${cachedAny.filename})，予以忽略并剔除`)
-                                indexManager.remove(normalizedUsername, id, folder, cachedAny.quality)
-                                try { fs.unlinkSync(filePath) } catch { }
-                                continue
-                            }
+                        const cachedDurSec = parseDurationSeconds(cachedAny.interval)
+                        if (cachedDurSec > 0 && cachedDurSec < MIN_PLAYABLE_AUDIO_SECONDS) {
+                            console.warn(`[文件缓存] 命中损坏的试听片段缓存 (${cachedAny.filename})，予以忽略并剔除`)
+                            indexManager.remove(normalizedUsername, id, folder, cachedAny.quality)
+                            try { fs.unlinkSync(filePath) } catch { }
+                            continue
                         }
                         return {
                             exists: true,
@@ -2601,26 +2597,23 @@ const downloadAndCacheImpl = async (songInfo: any, url: string, quality?: string
                 const actualQuality = inspection.quality || quality || 'unknown'
 
                 // 试听片段 / 残缺音频防御检查：
-                // 如果期望时长 > 60s，但下载到的音频时长过短（如网易云等平台返回的 30s-45s 试听片段），拒绝写入缓存
+                // 目录里的 interval 经常与真实时长不符，不能按比例或体积误拒短儿歌；
+                // 只拒绝两类确定异常的下载：确认时长低于 10s，或识别不出音频容器且体积过小
                 const expectedDurationSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
                 const actualDurationSec = inspection.duration ? Math.round(inspection.duration / 1000) : 0
-                if (expectedDurationSec > 60 && actualDurationSec > 0) {
-                    const isTeaser = actualDurationSec < 60 ||
-                        (actualDurationSec < expectedDurationSec * 0.5) ||
-                        (actualDurationSec <= 90 && (expectedDurationSec - actualDurationSec) > 45)
-                    if (isTeaser) {
-                        console.warn(`[文件缓存] 检测到试听片段/音频残缺 (${actualDurationSec}s vs 预期 ${expectedDurationSec}s)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
-                        safeUnlink(fileStream, tempPath)
-                        fail(new Error(`试听片段 (${actualDurationSec}s / 预期 ${expectedDurationSec}s)，已拒绝写入缓存`))
-                        return
-                    }
+                if (actualDurationSec > 0 && actualDurationSec < MIN_PLAYABLE_AUDIO_SECONDS) {
+                    console.warn(`[文件缓存] 检测到试听片段/音频残缺 (${actualDurationSec}s)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
+                    safeUnlink(fileStream, tempPath)
+                    fail(new Error(`试听片段 (${actualDurationSec}s)，已拒绝写入缓存`))
+                    return
                 }
-                if (expectedDurationSec > 120 && actualDurationSec === 0) {
+                if (actualDurationSec === 0 && expectedDurationSec > 120 &&
+                    (inspection.audioContainer === 'unknown' || inspection.audioContainer === 'encrypted')) {
                     const stat = fs.existsSync(tempPath) ? fs.statSync(tempPath) : null
                     if (stat && stat.size < 300 * 1024) {
-                        console.warn(`[文件缓存] 检测到异常过小音频文件 (${stat.size} bytes vs 预期时长 ${expectedDurationSec}s)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
+                        console.warn(`[文件缓存] 检测到无法识别的非音频响应 (${stat.size} bytes)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
                         safeUnlink(fileStream, tempPath)
-                        fail(new Error(`音频文件过小 (${stat.size} bytes / 预期 ${expectedDurationSec}s)，已拒绝写入缓存`))
+                        fail(new Error(`音频文件无法识别且体积过小 (${stat.size} bytes)，已拒绝写入缓存`))
                         return
                     }
                 }

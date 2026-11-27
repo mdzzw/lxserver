@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('public/music/app.js', 'utf8');
 function load(name, end, globals) {
-    const context = vm.createContext({ console, ...globals });
+    const storage = new Map();
+    const context = vm.createContext({ console, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)), removeItem: key => storage.delete(key) }, document: { addEventListener() {}, getElementById: () => null, querySelector: () => null }, ...globals });
     vm.runInContext(source.slice(source.indexOf(`async function ${name}(`), source.indexOf(end, source.indexOf(`async function ${name}(`))), context);
     return context;
 }

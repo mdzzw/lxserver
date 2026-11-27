@@ -240,7 +240,8 @@ const route = async (req: http.IncomingMessage, res: http.ServerResponse, pathna
     switch (action) {
       case 'pause':
         extra.result = await player.pause()
-        ok = extra.result === 'paused'
+        // 设备本来就已停止时也视为暂停成功，避免“操作未成功”的误报
+        ok = extra.result !== 'failed'
         break
       case 'resume':
         ok = await player.resume()

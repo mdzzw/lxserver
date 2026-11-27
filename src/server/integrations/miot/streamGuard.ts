@@ -8,8 +8,6 @@ export const STREAM_FAIL_WINDOW_MS = 90 * 1000
 export const STREAM_FAIL_VERIFY_MS = 2000
 /** 我方 TTS/播报会打断流播放，期间不判定拉流失败 */
 export const STREAM_TTS_GRACE_MS = 20 * 1000
-/** 连续拉流失败上限：超过后停止自动删歌切歌，避免断网清空歌单 */
-export const MAX_STREAM_FAIL_STREAK = 3
 
 export type DeviceStopVerdict = 'ended' | 'stream-failed' | 'tts-interrupted' | 'defer'
 

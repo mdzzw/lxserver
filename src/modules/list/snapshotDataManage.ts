@@ -137,7 +137,8 @@ export class SnapshotDataManage {
     syncLog.info('saveSnapshot', this.userDataManage.userName, name)
     const filePath = path.join(this.snapshotDir, `snapshot_${name}`)
     try {
-      fs.writeFileSync(filePath, data)
+      // 写盘改为异步，避免删除歌曲时同步写整个歌单快照阻塞主线程
+      await fs.promises.writeFile(filePath, data)
       // 歌单快照落盘后，防抖触发一次云端备份（与缓存落盘上传同一入口；按配置备份 snapshots 类型）
       void (globalThis as any).lx?.scheduleOpenlistSync?.()
       // 本地备份开关打开时，复制一份快照到备份目录（"跟配置走"，复用 configBackup.enable 与备份目录约定）
@@ -152,10 +153,10 @@ export class SnapshotDataManage {
     syncLog.info('saveSnapshotWithTime', this.userDataManage.userName, name, time)
     const filePath = path.join(this.snapshotDir, `snapshot_${name}`)
     try {
-      fs.writeFileSync(filePath, data)
+      await fs.promises.writeFile(filePath, data)
       if (time) {
         const date = new Date(time)
-        fs.utimesSync(filePath, date, date)
+        await fs.promises.utimes(filePath, date, date)
       }
       // 导入来源是显式登记的，避免下次自动快照把它误当成系统快照
       this.markImported(name)

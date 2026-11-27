@@ -45,6 +45,7 @@ import type {
   MiotDevicePlayState,
   MiotLoginResult,
   MiotPlaybackView,
+  MiotPlayCommandResult,
   MiotServiceToken,
   MiotSettings,
   MiotSong,
@@ -121,7 +122,7 @@ class MiotService implements MiotDeviceController {
     this.players.clear()
     for (const session of this.qrSessions.values()) session.login.reset()
     this.qrSessions.clear()
-    this.store.flush()
+    this.store.flushSync()
     this.started = false
   }
 
@@ -998,9 +999,9 @@ class MiotService implements MiotDeviceController {
 
   // ===== 设备控制器（供播放器使用） =====
 
-  async playUrl(accountId: string, deviceId: string, url: string, meta: { title: string; artist?: string }): Promise<boolean> {
+  async playUrl(accountId: string, deviceId: string, url: string, meta: { title: string; artist?: string }): Promise<MiotPlayCommandResult> {
     const client = await this.getClient(accountId)
-    if (!client) return false
+    if (!client) return 'failed'
     const device = this.store.getDevice(accountId, deviceId)
     return client.playByUrl(deviceId, url, device?.hardware ?? '', this.store.getSettings().keep_light)
   }

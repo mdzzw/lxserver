@@ -1168,6 +1168,8 @@ async function handleTogglePublicFavorites() {
 window.handleTogglePublicFavorites = handleTogglePublicFavorites;
 
 let userTokenRefreshPromise = null;
+let userTokenVerifyPromise = null;
+let userTokenVerifyInfo = null;
 
 async function ensureUserAuthToken(options = {}) {
     const force = options.force === true;
@@ -1176,19 +1178,35 @@ async function ensureUserAuthToken(options = {}) {
     const token = typeof userToken !== 'undefined' ? userToken : localStorage.getItem('lx_user_token');
 
     if (token && !force) {
-        try {
-            const response = await fetch('/api/music/auth/verify', {
-                headers: { 'x-user-token': token }, cache: 'no-store', signal: AbortSignal.timeout(5000)
-            });
-            const result = response.ok ? await response.json() : null;
-            if ((localStorage.getItem('lx_sync_user') || '') !== username) return false;
-            if (result?.valid && result.user === username) {
-                userToken = token;
-                return true;
-            }
-        } catch (_) { return false; }
+        // 60 秒内复用验证结果，避免评分/偏好等每个请求都先打一次 /auth/verify
+        if (userTokenVerifyInfo && userTokenVerifyInfo.token === token && userTokenVerifyInfo.user === username && Date.now() - userTokenVerifyInfo.at < 60000) return true;
+        const verifyKey = `${username}\0${token}`;
+        if (!userTokenVerifyPromise || userTokenVerifyPromise.key !== verifyKey) {
+            const promise = (async () => {
+                try {
+                    const response = await fetch('/api/music/auth/verify', {
+                        headers: { 'x-user-token': token }, cache: 'no-store', signal: AbortSignal.timeout(5000)
+                    });
+                    const result = response.ok ? await response.json() : null;
+                    if ((localStorage.getItem('lx_sync_user') || '') !== username) return 'switch';
+                    if (result?.valid && result.user === username) {
+                        userToken = token;
+                        userTokenVerifyInfo = { token, user: username, at: Date.now() };
+                        return 'valid';
+                    }
+                    return 'invalid';
+                } catch (_) { return 'error'; }
+            })();
+            userTokenVerifyPromise = { key: verifyKey, promise };
+            promise.finally(() => { if (userTokenVerifyPromise?.promise === promise) userTokenVerifyPromise = null; });
+        }
+        const outcome = await userTokenVerifyPromise.promise;
+        if (outcome === 'valid') return true;
+        // 网络异常或账号已切换时保持原行为，不再尝试密码续签
+        if (outcome !== 'invalid') return false;
     }
 
+    if (force) userTokenVerifyInfo = null;
     if (!username || !password) {
         return false;
     }
@@ -1213,6 +1231,7 @@ async function ensureUserAuthToken(options = {}) {
 
             userToken = result.token;
             localStorage.setItem('lx_user_token', userToken);
+            userTokenVerifyInfo = { token: userToken, user: username, at: Date.now() };
             if (typeof updateUserUI === 'function') updateUserUI();
             return true;
         } catch (error) {
@@ -8869,8 +8888,8 @@ audio.addEventListener('timeupdate', () => {
         window._lastMedPosUpdate = now;
     }
 
-    // 自动恢复：保存播放进度 (节流)
-    if (settings.autoResume && (!window._lastStateSave || now - window._lastStateSave > 5000)) {
+    // 自动恢复：保存播放进度 (节流；整队列写入很重，15 秒一次足够)
+    if (settings.autoResume && (!window._lastStateSave || now - window._lastStateSave > 15000)) {
         savePlaybackState();
         window._lastStateSave = now;
     }

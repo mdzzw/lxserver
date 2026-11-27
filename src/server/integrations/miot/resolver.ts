@@ -1,29 +1,16 @@
 import { checkCache, downloadAndCache } from '@/server/music/fileCache'
 import { findLocalTrack, getLocalTracks, localFile, localMusic, type LocalTrack } from '@/server/music/subsonicLocal'
-import { getDownloadQualityCandidates } from '@/server/music/downloadQuality'
-import { findSourceMatches } from '@/server/music/sourceMatch'
+import { getDownloadQualityCandidates, getQualityRank } from '@/server/music/downloadQuality'
+import { readUserPlaybackFallback, openLibraryUser, parseSongIntervalSeconds } from '@/server/music/playbackFallback'
+import { getPlaybackRaceConfig, planFallbackSteps, raceFallbackCandidates, type FallbackAttempt, type FallbackCandidate, type PlaybackRaceConfig } from '@/server/music/fastFallback'
+import { findSourceMatches, pickSwitchCandidates } from '@/server/music/sourceMatch'
 import { callUserApiGetMusicUrl, isSourceSupported } from '@/server/sources/userApi'
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 import { miotLog } from './log'
+import { inspectRemoteUrl } from './reachability'
 import type { MiotSong } from './types'
 
 const musicSdk = musicSdkRaw as any
-
-const MAX_SWITCH_MATCHES = 4
-
-/** 每个平台只取匹配度最高的版本，避免原版失败时误播伴奏/DJ 版。 */
-const pickSwitchCandidates = (matches: any[]): MiotSong[] => {
-  const picked: MiotSong[] = []
-  const seenSources = new Set<string>()
-  for (const match of matches) {
-    const source = String(match?.source || '')
-    if (!source || seenSources.has(source)) continue
-    seenSources.add(source)
-    picked.push(match)
-    if (picked.length >= MAX_SWITCH_MATCHES) break
-  }
-  return picked
-}
 
 export type MiotStreamKind = 'local' | 'cache' | 'remote'
 
@@ -34,9 +21,9 @@ export interface ResolvedSongSource {
   filename?: string
   folder?: 'cache' | 'music'
   remoteUrl?: string
+  /** 探测到的真实音频时长（秒），仅在线源且能解析容器头时提供 */
+  durationSeconds?: number | null
 }
-
-export const openLibraryUser = (username: string): string => username && username !== 'default' ? username : '_open'
 
 const cachedSourceOf = (song: MiotSong, username: string, fallbackQuality: string): ResolvedSongSource | null => {
   // 用本次请求音质做“同名同歌手”判定：同音质命中即视为已存在；音质不同则走在线解析并按升级流程下载。
@@ -50,29 +37,66 @@ const cachedSourceOf = (song: MiotSong, username: string, fallbackQuality: strin
   }
 }
 
-/** 同一平台内：多自定义源轮询（callUserApiGetMusicUrl 内部处理）+ 逐级降音质。 */
-const resolveFromSource = async (song: MiotSong, username: string, quality: string): Promise<ResolvedSongSource | null> => {
+/** 单平台单音质在线解析：同平台多自定义源轮询由 callUserApiGetMusicUrl 处理，最后做可达性/试听探测。 */
+const resolveFromSource = async (
+  song: MiotSong,
+  username: string,
+  quality: string,
+  expectedSeconds: number,
+  race: PlaybackRaceConfig,
+): Promise<ResolvedSongSource | null> => {
   const source = song.source
   if (!source || source === 'local') return null
   if (!isSourceSupported(source, username || undefined)) {
     miotLog.warn(`[MIoT] source "${source}" 没有可用的自定义源，无法为 "${song.name}" 取播放链接`)
     return null
   }
-  for (const candidate of getDownloadQualityCandidates(quality)) {
-    try {
-      const result = await callUserApiGetMusicUrl(source, song, candidate, username || undefined, undefined, true)
-      if (result?.url) {
-        return {
-          kind: 'remote',
-          quality: result.type || candidate,
-          remoteUrl: result.url.trim(),
-        }
-      }
-    } catch (err: any) {
-      miotLog.warn(`[MIoT] resolve "${song.name}" source=${source} quality=${candidate} failed: ${err?.message || err}`)
+  try {
+    const result = await callUserApiGetMusicUrl(source, song, quality, username || undefined, undefined, true)
+    if (!result?.url) return null
+    const remoteUrl = result.url.trim()
+    const inspection = await inspectRemoteUrl(remoteUrl, expectedSeconds, race.probeTimeoutMs, race.deepProbeTimeoutMs)
+    if (inspection.verdict !== 'ok') {
+      const size = formatSize(inspection.totalBytes)
+      const reason = inspection.verdict === 'trial'
+        ? `疑似试听（实际时长约 ${Math.max(1, Math.round(inspection.durationSeconds || 0))}s，${size}）`
+        : inspection.verdict === 'invalid'
+          ? `返回内容不是音频（${inspection.contentType || '未知类型'}，${size}）`
+          : '不可达'
+      miotLog.warn(`[MIoT] resolve "${song.name}" source=${source} quality=${quality} 返回的链接${reason}，继续降级/换源`)
+      return null
     }
+    if (inspection.durationSeconds != null && expectedSeconds >= 30 && inspection.durationSeconds < expectedSeconds * 0.6) {
+      miotLog.info(`[MIoT] resolve "${song.name}" source=${source} quality=${quality} 实际时长约 ${Math.round(inspection.durationSeconds)}s，短于标注 ${expectedSeconds}s，仍尝试播放`)
+    }
+    return {
+      kind: 'remote',
+      quality: result.type || quality,
+      remoteUrl,
+      durationSeconds: inspection.durationSeconds,
+    }
+  } catch (err: any) {
+    miotLog.warn(`[MIoT] resolve "${song.name}" source=${source} quality=${quality} failed: ${err?.message || err}`)
+    return null
   }
-  return null
+}
+
+const trySongAtQuality = async (
+  song: MiotSong,
+  username: string,
+  quality: string,
+  fallbackSeconds: number,
+  race: PlaybackRaceConfig,
+): Promise<ResolvedSongSource | null> => {
+  const cached = cachedSourceOf(song, username, quality)
+  if (cached) return cached
+  return resolveFromSource(song, username, quality, parseSongIntervalSeconds(song.interval) || fallbackSeconds, race)
+}
+
+const formatSize = (bytes: number): string => {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+  if (bytes > 0) return `${Math.max(1, Math.round(bytes / 1024))}KB`
+  return '大小未知'
 }
 
 export const resolveSongSource = async (song: MiotSong, username: string, quality: string): Promise<ResolvedSongSource | null> => {
@@ -91,46 +115,103 @@ export const resolveSongSource = async (song: MiotSong, username: string, qualit
   // 音源搜索结果的站内 ID 常在 songmid/songId 上，没有统一的 id 字段。
   if (!songId && !song.songmid && !song.songId) return null
 
+  // 请求音质已有缓存时直接播放，避免为命中缓存的歌曲白跑一次跨平台匹配搜索
   const cached = cachedSourceOf(song, username, quality)
   if (cached) return cached
 
-  const direct = await resolveFromSource(song, username, quality)
-  if (direct) return direct
+  const config = readUserPlaybackFallback(username)
+  const race = getPlaybackRaceConfig()
+  const qualities = config.degradeQuality ? getDownloadQualityCandidates(quality) : [quality]
+  const expectedSeconds = parseSongIntervalSeconds(song.interval)
 
-  // 原平台不可用或全音质解析失败：跨平台匹配同曲后再试，全部失败才交给播放器删除。
-  const candidates = pickSwitchCandidates(await findSourceMatches(song, username))
-  if (candidates.length === 0) return null
-  miotLog.info(`[MIoT] "${song.name}" 原平台 ${song.source || '未知'} 无法播放，尝试跨平台换源（${candidates.map(item => item.source).join('/')}）`)
-
-  for (const match of candidates) {
-    const hit = cachedSourceOf(match, username, quality)
-    if (hit) {
-      miotLog.info(`[MIoT] 换源命中本地 (${hit.kind}) "${song.name}" ${song.source || '未知'} -> ${match.source}`)
-      return hit
+  // 匹配搜索与首路解析同时启动：竞速轮到换源候选时通常已拿到结果，不再等原平台失败后才开始搜索
+  const matchesTask: Promise<MiotSong[]> | null = config.switchPlatform
+    ? findSourceMatches(song, username).then(pickSwitchCandidates).catch(() => [])
+    : null
+  let matchesLogged = false
+  const getMatches = async (): Promise<MiotSong[]> => {
+    if (!matchesTask) return []
+    const matches = await matchesTask
+    if (matches.length > 0 && !matchesLogged) {
+      matchesLogged = true
+      miotLog.info(`[MIoT] "${song.name}" 换源候选（${matches.map(item => `${item.source}/${item.singer}`).join('，')}）`)
     }
-    const resolved = await resolveFromSource(match, username, quality)
-    if (resolved) {
-      miotLog.info(`[MIoT] 换源播放 "${song.name}" ${song.source || '未知'} -> ${match.source}/${match.singer} (${resolved.quality})`)
-      return resolved
+    return matches
+  }
+
+  const plan = async function* (): AsyncGenerator<FallbackCandidate<ResolvedSongSource>> {
+    for await (const step of planFallbackSteps(song, qualities, config.platformFirst, getMatches)) {
+      const kind = step.switched ? 'switch' : 'origin'
+      const key = `${kind}:${step.target.source || 'unknown'}:${step.quality}`
+      yield {
+        key,
+        run: async (): Promise<FallbackAttempt<ResolvedSongSource> | null> => {
+          const hit = await trySongAtQuality(step.target, username, step.quality, expectedSeconds, race)
+          if (!hit) return null
+          return { result: hit, quality: hit.quality, rank: getQualityRank(hit.quality), key }
+        },
+      }
     }
   }
-  return null
+
+  const winner = await raceFallbackCandidates(plan(), race)
+  if (!winner) return null
+  if (winner.key?.startsWith('switch:')) {
+    miotLog.info(`[MIoT] 换源播放 "${song.name}" ${song.source || '未知'} -> ${winner.key.split(':')[1]} (${winner.quality})`)
+  } else if (winner.quality !== quality) {
+    miotLog.info(`[MIoT] 降质播放 "${song.name}" ${quality} -> ${winner.quality}`)
+  }
+  return winner.result
+}
+
+const WARM_FAIL_COOLDOWN_MS = 10 * 60 * 1000
+const warmFailures = new Map<string, number>()
+
+const warmFailureKey = (song: MiotSong, quality: string): string =>
+  `${song.source || ''}\u0000${song.songmid || song.id || ''}\u0000${song.name || ''}\u0000${song.singer || ''}\u0000${quality}`
+
+/** 上游失效时避免每次拉流都重复触发同一个必然失败的下载（例如整张歌单 522）。 */
+const warmAllowed = (song: MiotSong, quality: string): boolean => {
+  const at = warmFailures.get(warmFailureKey(song, quality))
+  return !at || Date.now() - at >= WARM_FAIL_COOLDOWN_MS
+}
+
+const noteWarmFailure = (song: MiotSong, quality: string): void => {
+  if (warmFailures.size > 500) {
+    const cutoff = Date.now() - WARM_FAIL_COOLDOWN_MS
+    for (const [key, at] of warmFailures) if (at < cutoff) warmFailures.delete(key)
+  }
+  warmFailures.set(warmFailureKey(song, quality), Date.now())
 }
 
 export const warmSongCache = (song: MiotSong, username: string, resolved: ResolvedSongSource): void => {
   if (resolved.kind !== 'remote' || !resolved.remoteUrl) return
+  if (!warmAllowed(song, resolved.quality)) return
   void downloadAndCache(song, resolved.remoteUrl, resolved.quality, username || undefined)
-    .then(() => miotLog.info(`[MIoT] 已缓存 "${song.name}" (${resolved.quality})`))
-    .catch((err: any) => miotLog.warn(`[MIoT] 缓存 "${song.name}" 失败: ${err?.message || err}`))
+    .then(() => {
+      warmFailures.delete(warmFailureKey(song, resolved.quality))
+      miotLog.info(`[MIoT] 已缓存 "${song.name}" (${resolved.quality})`)
+    })
+    .catch((err: any) => {
+      noteWarmFailure(song, resolved.quality)
+      miotLog.warn(`[MIoT] 缓存 "${song.name}" 失败: ${err?.message || err}`)
+    })
 }
 
 /** VIP 自动下载：直接落到用户下载目录（音乐库），之后再播优先命中本地。歌单旧数据没有 vip 字段时也走这里。 */
 export const warmVipDownload = (song: MiotSong, username: string, resolved: ResolvedSongSource): void => {
   if (resolved.kind !== 'remote' || !resolved.remoteUrl) return
+  if (!warmAllowed(song, resolved.quality)) return
   const label = song.vip ? 'VIP 歌曲' : '未标记 VIP 歌曲'
   void downloadAndCache(song, resolved.remoteUrl, resolved.quality, username || undefined, undefined, true)
-    .then(() => miotLog.info(`[MIoT] ${label}已下载到本地 "${song.name}" (${resolved.quality})`))
-    .catch((err: any) => miotLog.warn(`[MIoT] ${label}下载 "${song.name}" 失败: ${err?.message || err}`))
+    .then(() => {
+      warmFailures.delete(warmFailureKey(song, resolved.quality))
+      miotLog.info(`[MIoT] ${label}已下载到本地 "${song.name}" (${resolved.quality})`)
+    })
+    .catch((err: any) => {
+      noteWarmFailure(song, resolved.quality)
+      miotLog.warn(`[MIoT] ${label}下载 "${song.name}" 失败: ${err?.message || err}`)
+    })
 }
 
 const normalizeText = (value: unknown): string => String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim()

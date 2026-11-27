@@ -6,7 +6,6 @@ import { normalizePlayMode, type MiotStore } from './store'
 import { createStreamUrl } from './stream'
 import {
   classifyDeviceStop,
-  MAX_STREAM_FAIL_STREAK,
   STREAM_CONFIRM_POSITION_SEC,
   STREAM_CONFIRM_SAMPLES,
   STREAM_FAIL_VERIFY_MS,
@@ -15,6 +14,7 @@ import type {
   MiotDeviceController,
   MiotDevicePlayState,
   MiotPlaybackView,
+  MiotPlayCommandResult,
   MiotPlayerStatus,
   MiotPlayMode,
   MiotSettings,
@@ -29,6 +29,12 @@ const MAX_CONSECUTIVE_SKIP = 3
 const MAX_SCAN_SKIP = 20
 const RECOMMEND_BATCH = 20
 const MAX_RECOMMEND_ATTEMPTS = 3
+/** 播放指令回执超时（3012）后回读状态的间隔 */
+const CONTROL_TIMEOUT_RECHECK_MS = 4000
+/** 确认设备未起播时，同一首歌最多重发播放指令的次数 */
+const MAX_PLAY_RECOVERY_ATTEMPTS = 2
+/** 临时队列或删歌失败时无法真正前进，连续失败到这里后停止，避免原地重试同一首 */
+const MAX_UNREMOVED_STREAM_FAILURES = 3
 
 export interface MiotPlayerContext {
   store: MiotStore
@@ -97,12 +103,18 @@ export class MiotPlayer {
   private statusTimer: ReturnType<typeof setTimeout> | null = null
   private sleep: SleepTimerState | null = null
   private lastFailureRemoved = false
+  private lastFailureKind: 'source' | 'control' | null = null
+  private currentPlayUrl = ''
+  private playReceiptUncertain = false
+  private playRecoveryAttempts = 0
   private playStartedAt = 0
   private playConfirmed = false
   private playingSamples = 0
+  private pausedFromLoading = false
   private lastTtsAt = 0
   private streamFailureHandling = false
   private streamFailureStreak = 0
+  private streamFailureUnremoved = 0
   private autoRecommend = false
   private recommendSeed: MiotSong | null = null
   private recommendType = ''
@@ -180,6 +192,9 @@ export class MiotPlayer {
     if (this.statusTimer) clearTimeout(this.statusTimer)
     this.endTimer = null
     this.statusTimer = null
+    this.currentPlayUrl = ''
+    this.playReceiptUncertain = false
+    this.playRecoveryAttempts = 0
   }
 
   /**
@@ -305,6 +320,7 @@ export class MiotPlayer {
 
   async playPlaylist(listId: string, options: PlayOptions = {}): Promise<boolean> {
     await this.ensureLoaded()
+    this.resetStreamFailureState()
     this.resetRecommendState(false)
     const playlist = await loadPlaylist(this.settings.username, listId)
     if (!playlist) {
@@ -325,6 +341,7 @@ export class MiotPlayer {
   async playSongs(songs: MiotSong[], name: string, options: PlayOptions = {}): Promise<boolean> {
     await this.ensureLoaded()
     if (songs.length === 0) return false
+    this.resetStreamFailureState()
     this.listId = TEMP_LIST_ID
     this.listName = name
     this.songs = songs
@@ -335,6 +352,7 @@ export class MiotPlayer {
   /** 跳到指定序号播放，遇到无法播放的歌曲继续向后跳过。 */
   async playAt(index: number, options: PlayOptions = {}): Promise<boolean> {
     await this.ensureLoaded()
+    this.resetStreamFailureState()
     return this.playWithSkip(index, MAX_CONSECUTIVE_SKIP, options)
   }
 
@@ -351,8 +369,11 @@ export class MiotPlayer {
       return false
     }
 
+    const wasPlaying = this.status === 'playing'
     const generation = ++this.generation
     this.lastFailureRemoved = false
+    this.lastFailureKind = null
+    this.pausedFromLoading = false
     this.clearTimers()
     this.index = index
     const song = this.songs[index]
@@ -365,17 +386,27 @@ export class MiotPlayer {
 
     const settings = this.settings
     let url: string | null = null
+    let resolvedDuration = 0
     try {
-      url = await createStreamUrl(this.accountId, this.deviceId, song, settings.username, settings.quality, {
-        publicBaseUrl: settings.public_base_url,
-        cacheOnPlay: settings.cache_on_play,
-        vipAutoDownload: settings.vip_auto_download,
-      })
+      // 解析下一首可能耗时（降品/换源），并行停掉音箱上的单曲列表，避免这期间重复播放上一首
+      const [stream] = await Promise.all([
+        createStreamUrl(this.accountId, this.deviceId, song, settings.username, settings.quality, {
+          publicBaseUrl: settings.public_base_url,
+          cacheOnPlay: settings.cache_on_play,
+          vipAutoDownload: settings.vip_auto_download,
+        }),
+        wasPlaying
+          ? this.controller.stop(this.accountId, this.deviceId).catch(() => false)
+          : Promise.resolve(false),
+      ])
+      url = stream?.url ?? null
+      resolvedDuration = Math.round(stream?.durationSeconds || 0)
     } catch (err: any) {
       miotLog.warn(`[MIoT] 解析歌曲失败 "${song.name}": ${err?.message || err}`)
     }
     if (generation !== this.generation) return false
     if (!url) {
+      this.lastFailureKind = 'source'
       const removed = await this.dropUnplayableSong(song)
       if (generation !== this.generation) return false
       this.lastFailureRemoved = removed
@@ -396,14 +427,24 @@ export class MiotPlayer {
       return false
     }
 
-    let ok = false
+    let result: MiotPlayCommandResult = 'failed'
     try {
-      ok = await this.controller.playUrl(this.accountId, this.deviceId, url, { title: song.name, artist: song.singer })
+      result = await this.controller.playUrl(this.accountId, this.deviceId, url, { title: song.name, artist: song.singer })
     } catch (err: any) {
       miotLog.warn(`[MIoT] 下发播放失败: ${err?.message || err}`)
     }
-    if (generation !== this.generation) return false
-    if (!ok) {
+    if (generation !== this.generation) {
+      // 指令下发期间用户已暂停/停止：撤销刚发出的播放，避免音箱继续出声
+      const currentStatus = this.getStatus()
+      if (currentStatus === 'paused' || currentStatus === 'stopped') {
+        try {
+          await this.controller.stop(this.accountId, this.deviceId)
+        } catch { /* 已停止 */ }
+      }
+      return false
+    }
+    if (result === 'failed') {
+      this.lastFailureKind = 'control'
       this.status = 'error'
       this.error = '音箱没有接受播放指令'
       this.updatedAt = Date.now()
@@ -414,21 +455,34 @@ export class MiotPlayer {
       return false
     }
 
+    this.currentPlayUrl = url
+    if (result === 'timeout') {
+      // 云端没拿到回执不代表音源不可播：设备可能已在播放，保留曲目并回读/重发
+      this.playReceiptUncertain = true
+      this.playRecoveryAttempts = 0
+    }
     this.status = 'playing'
     this.startedAt = Date.now()
+    if (resolvedDuration > 0) this.duration = resolvedDuration
     this.playStartedAt = this.startedAt
     this.playConfirmed = false
     this.playingSamples = 0
     this.streamFailureHandling = false
     this.updatedAt = Date.now()
     if (this.autoRecommend) this.recommendPlayed.add(songKey(song))
-    miotLog.info(`[MIoT] 播放 ${this.listName} 第 ${index + 1}/${this.songs.length} 首: ${song.name} - ${song.singer}`)
-    this.scheduleEndTimer()
-    this.scheduleStatusPoll()
+    if (result === 'timeout') {
+      miotLog.warn(`[MIoT] 播放指令回执超时（3012），设备可能已开始播放，保留曲目与队列: ${song.name} - ${song.singer}`)
+      this.scheduleEndTimer()
+      this.scheduleStatusPoll(CONTROL_TIMEOUT_RECHECK_MS)
+    } else {
+      miotLog.info(`[MIoT] 播放 ${this.listName} 第 ${index + 1}/${this.songs.length} 首: ${song.name} - ${song.singer}`)
+      this.scheduleEndTimer()
+      this.scheduleStatusPoll()
+    }
     this.persist()
     this.maybePrepareRecommendations()
 
-    if (options.announce && this.settings.announce_song) await this.say(`正在播放 ${song.name}`)
+    if (result === 'ok' && options.announce && this.settings.announce_song) await this.say(`正在播放 ${song.name}`)
     return true
   }
 
@@ -445,6 +499,10 @@ export class MiotPlayer {
 
   private async handleSongEnd(): Promise<void> {
     if (this.status !== 'playing') return
+    if (this.playReceiptUncertain) {
+      this.failUncertainPlayback('无法确认音箱播放状态，请检查音箱网络后重试')
+      return
+    }
     if (this.sleep?.mode === 'songs') {
       if (!this.consumeSleepSong()) return
     }
@@ -452,6 +510,20 @@ export class MiotPlayer {
       await this.stopInternal()
       return
     }
+    // 上一首已结束：先停掉音箱上的单曲列表并进入加载态，
+    // 避免取推荐、降音质、跨平台换源等耗时期间反复播放上一首
+    this.clearTimers()
+    this.status = 'loading'
+    this.positionBase = 0
+    this.startedAt = 0
+    this.updatedAt = Date.now()
+    const generation = ++this.generation
+    try {
+      await this.controller.stop(this.accountId, this.deviceId)
+    } catch (err: any) {
+      miotLog.warn(`[MIoT] 切歌前停止设备异常: ${err?.message || err}`)
+    }
+    if (generation !== this.generation) return
     if (this.mode === 'single') {
       await this.playWithSkip(this.index, MAX_CONSECUTIVE_SKIP)
       return
@@ -466,6 +538,7 @@ export class MiotPlayer {
     )
     if (shouldRecommend) {
       const pool = this.recommendPool.length > 0 ? this.recommendPool : await this.prepareRecommendations()
+      if (generation !== this.generation) return
       if (pool.length > 0) {
         this.appendRecommendations(pool)
         nextIndex = this.nextIndex()
@@ -515,6 +588,10 @@ export class MiotPlayer {
         : { ...options, announce: false, consumeSleepSong: false, haltOnFailure: false })
       if (ok) return true
       if (this.status !== 'error') return false
+      if (this.lastFailureKind === 'control') {
+        miotLog.warn(`[MIoT] 播放控制失败，保留队列不自动跳过 "${failed?.name ?? ''}"`)
+        break
+      }
       if (!this.lastFailureRemoved) attempts++
       if (this.lastFailureRemoved && this.songs.length === 0) {
         this.index = -1
@@ -531,7 +608,7 @@ export class MiotPlayer {
       const next = this.lastFailureRemoved ? this.indexAfterRemoval(index) : this.nextIndexFrom(index)
       if (next === null) break
       if (!this.lastFailureRemoved) {
-        miotLog.info(`[MIoT] 所有音源均无法播放 "${failed?.name ?? ''}" (${failed?.source ?? ''})，尝试下一首`)
+        miotLog.info(`[MIoT] 跳过 "${failed?.name ?? ''}" (${failed?.source ?? ''})：${this.error || '播放失败'}，尝试下一首`)
       }
       index = next
     }
@@ -549,7 +626,14 @@ export class MiotPlayer {
 
   private markPlaybackConfirmed(): void {
     this.playConfirmed = true
+    this.resetStreamFailureState()
+    this.playReceiptUncertain = false
+    this.playRecoveryAttempts = 0
+  }
+
+  private resetStreamFailureState(): void {
     this.streamFailureStreak = 0
+    this.streamFailureUnremoved = 0
   }
 
   private async confirmStreamFailure(generation: number): Promise<boolean> {
@@ -566,70 +650,134 @@ export class MiotPlayer {
   }
 
   /**
+   * 播放指令回执超时后先回读设备状态：明确停止才重发同一首。
+   * 全程不删歌、不切队列，避免把云端控制超时误判成“所有音源不可播”。
+   */
+  private async recoverUncertainPlayback(generation: number): Promise<void> {
+    if (generation !== this.generation || this.status !== 'playing' || !this.playReceiptUncertain) return
+    const song = this.currentSong()
+    const url = this.currentPlayUrl
+    if (!song || !url) {
+      this.failUncertainPlayback('无法恢复播放：缺少播放地址')
+      return
+    }
+    if (this.playRecoveryAttempts >= MAX_PLAY_RECOVERY_ATTEMPTS) {
+      this.failUncertainPlayback('音箱控制通道超时，请检查音箱网络后重试')
+      return
+    }
+    this.playRecoveryAttempts++
+    let result: MiotPlayCommandResult = 'failed'
+    try {
+      result = await this.controller.playUrl(this.accountId, this.deviceId, url, { title: song.name, artist: song.singer })
+    } catch (err: any) {
+      miotLog.warn(`[MIoT] 控制超时后重发播放异常: ${err?.message || err}`)
+    }
+    if (generation !== this.generation || this.status !== 'playing' || !this.playReceiptUncertain) return
+    if (result === 'ok') {
+      this.playReceiptUncertain = false
+      this.playRecoveryAttempts = 0
+      this.positionBase = 0
+      this.startedAt = Date.now()
+      this.playStartedAt = this.startedAt
+      this.playConfirmed = false
+      this.playingSamples = 0
+      this.updatedAt = Date.now()
+      this.persist()
+      this.scheduleEndTimer()
+      this.scheduleStatusPoll()
+      miotLog.info(`[MIoT] 控制超时后重发播放成功: ${song.name} - ${song.singer}`)
+      return
+    }
+    if (result === 'timeout') {
+      miotLog.warn(`[MIoT] 控制超时后重发仍未确认（第 ${this.playRecoveryAttempts} 次），继续回读音箱状态: ${song.name}`)
+      this.scheduleStatusPoll(CONTROL_TIMEOUT_RECHECK_MS)
+      return
+    }
+    this.failUncertainPlayback('音箱没有接受播放指令')
+  }
+
+  private failUncertainPlayback(message: string): void {
+    this.clearTimers()
+    this.status = 'error'
+    this.error = message
+    this.updatedAt = Date.now()
+    this.persist()
+    miotLog.warn(`[MIoT] ${message} device=${this.deviceId}，保留播放队列不删歌不切歌`)
+  }
+
+  /**
    * 设备已接受播放指令但从未真正起播（典型为提示“没有版权/无可用音源”后停止）：
-   * 从歌单删除该曲并切到下一首；连续失败过多则停止，避免一次断网清空歌单。
+   * 从歌单删除该曲并切到下一首，连续失败也继续，不主动停播；
+   * 只有临时队列/删除失败导致无法前进时才设上限，避免原地重试同一首。
    */
   private async handleStreamFailure(): Promise<void> {
     if (this.status !== 'playing' || this.playConfirmed || this.streamFailureHandling) return
     const song = this.currentSong()
     if (!song) return
     this.streamFailureHandling = true
-    this.clearTimers()
-    const generation = ++this.generation
-    const failedIndex = this.index
-    this.status = 'loading'
-    this.updatedAt = Date.now()
+    try {
+      this.clearTimers()
+      const generation = ++this.generation
+      const failedIndex = this.index
+      this.status = 'loading'
+      this.updatedAt = Date.now()
 
-    if (this.streamFailureStreak >= MAX_STREAM_FAIL_STREAK) {
-      this.status = 'error'
-      this.error = '连续多首歌曲拉流失败'
+      this.streamFailureStreak++
+      miotLog.warn(`[MIoT] 音箱拉流失败（未确认起播即停止）"${song.name}" - ${song.singer} source=${song.source || '未知'}，连续第 ${this.streamFailureStreak} 首`)
+
+      const removed = await this.dropUnplayableSong(song, '音箱拉流失败（未起播）')
+      if (generation !== this.generation) return
+      this.lastFailureRemoved = removed
+      if (removed) {
+        this.streamFailureUnremoved = 0
+        // 与取流失败分支一致：loadPlaylist 返回的是落雪列表的同一数组引用
+        const pos = this.songs.findIndex(item => item.id === song.id)
+        if (pos >= 0) this.songs.splice(pos, 1)
+      } else {
+        this.streamFailureUnremoved++
+        if (this.streamFailureUnremoved >= MAX_UNREMOVED_STREAM_FAILURES) {
+          this.status = 'error'
+          this.error = '连续多首歌曲拉流失败'
+          this.updatedAt = Date.now()
+          this.persist()
+          miotLog.warn(`[MIoT] 连续 ${MAX_UNREMOVED_STREAM_FAILURES} 首拉流失败且无法从歌单删除，停止自动切歌 device=${this.deviceId}`)
+          await this.haltDevice(generation)
+          return
+        }
+      }
+      if (this.songs.length === 0) {
+        this.index = -1
+        this.status = 'stopped'
+        this.positionBase = 0
+        this.error = ''
+        this.updatedAt = Date.now()
+        miotLog.info(`[MIoT] 歌单 "${this.listName}" 已没有可播放的歌曲`)
+        return
+      }
+
+      const nextIndex = removed ? this.indexAfterRemoval(failedIndex) : this.nextIndexFrom(failedIndex)
+      if (nextIndex === null || nextIndex < 0) {
+        this.status = 'error'
+        this.error = '没有可播放的下一首'
+        this.updatedAt = Date.now()
+        this.persist()
+        return
+      }
+      this.index = nextIndex
       this.updatedAt = Date.now()
       this.persist()
-      miotLog.warn(`[MIoT] 连续 ${MAX_STREAM_FAIL_STREAK} 首拉流失败，停止自动切歌 device=${this.deviceId}`)
-      await this.haltDevice(generation)
-      return
+      await this.playWithSkip(nextIndex, MAX_CONSECUTIVE_SKIP)
+    } finally {
+      this.streamFailureHandling = false
     }
-    this.streamFailureStreak++
-    miotLog.warn(`[MIoT] 音箱拉流失败（未确认起播即停止）"${song.name}" - ${song.singer} source=${song.source || '未知'}，连续第 ${this.streamFailureStreak} 首（上限 ${MAX_STREAM_FAIL_STREAK}）`)
-
-    const removed = await this.dropUnplayableSong(song, '音箱拉流失败（未起播）')
-    if (generation !== this.generation) return
-    this.lastFailureRemoved = removed
-    if (removed) {
-      // 与取流失败分支一致：loadPlaylist 返回的是落雪列表的同一数组引用
-      const pos = this.songs.findIndex(item => item.id === song.id)
-      if (pos >= 0) this.songs.splice(pos, 1)
-    }
-    if (this.songs.length === 0) {
-      this.index = -1
-      this.status = 'stopped'
-      this.positionBase = 0
-      this.error = ''
-      this.updatedAt = Date.now()
-      miotLog.info(`[MIoT] 歌单 "${this.listName}" 已没有可播放的歌曲`)
-      return
-    }
-
-    const nextIndex = removed ? this.indexAfterRemoval(failedIndex) : this.nextIndexFrom(failedIndex)
-    if (nextIndex === null || nextIndex < 0) {
-      this.status = 'error'
-      this.error = '没有可播放的下一首'
-      this.updatedAt = Date.now()
-      this.persist()
-      return
-    }
-    this.index = nextIndex
-    this.updatedAt = Date.now()
-    this.persist()
-    await this.playWithSkip(nextIndex, MAX_CONSECUTIVE_SKIP)
   }
 
-  private scheduleStatusPoll(): void {
+  private scheduleStatusPoll(delay = STATUS_POLL_MS): void {
     if (this.statusTimer) clearTimeout(this.statusTimer)
     this.statusTimer = setTimeout(() => {
       this.statusTimer = null
       void this.pollDeviceStatus()
-    }, STATUS_POLL_MS)
+    }, delay)
   }
 
   private async pollDeviceStatus(): Promise<void> {
@@ -685,12 +833,21 @@ export class MiotPlayer {
         return
       }
       if (verdict === 'tts-interrupted') {
+        if (this.playReceiptUncertain) {
+          await this.recoverUncertainPlayback(generation)
+          return
+        }
         // 我方播报会打断流播放：先尝试恢复/重推当前曲，避免把自家播报误判成拉流失败
         this.scheduleStatusPoll()
         void this.ensureDevicePlaying()
         return
       }
       if (verdict === 'stream-failed') {
+        if (this.playReceiptUncertain) {
+          // 控制回执超时后的状态回读：明确未播放才重发同一首，不按拉流失败删歌
+          await this.recoverUncertainPlayback(generation)
+          return
+        }
         if (await this.confirmStreamFailure(generation)) {
           await this.handleStreamFailure()
         } else if (generation === this.generation && this.status === 'playing') {
@@ -706,9 +863,28 @@ export class MiotPlayer {
 
   async pause(): Promise<'paused' | 'stopped' | 'failed'> {
     await this.ensureLoaded()
+    if (this.status === 'loading') {
+      // 解析下一首/换源降品期间暂停：取消本次解析并停掉设备，避免继续循环上一首
+      this.generation++
+      this.clearTimers()
+      this.status = 'paused'
+      this.positionBase = 0
+      this.startedAt = 0
+      this.pausedFromLoading = true
+      this.updatedAt = Date.now()
+      this.persist()
+      try {
+        await this.controller.stop(this.accountId, this.deviceId)
+      } catch (err: any) {
+        miotLog.warn(`[MIoT] 解析期间暂停时停止设备异常: ${err?.message || err}`)
+      }
+      miotLog.info(`[MIoT] 解析期间暂停，已取消本次切歌 device=${this.deviceId}`)
+      return 'paused'
+    }
     if (this.status !== 'playing') return this.status === 'stopped' ? 'stopped' : 'failed'
     const position = this.position()
     this.clearTimers()
+    this.pausedFromLoading = false
     const result = await this.controller.pause(this.accountId, this.deviceId)
     this.positionBase = position
     this.startedAt = 0
@@ -730,6 +906,13 @@ export class MiotPlayer {
     await this.ensureLoaded()
     if (this.status === 'playing') return true
     if (this.status === 'paused') {
+      if (this.pausedFromLoading) {
+        // 解析中途暂停时音箱没有加载任何流，继续播放需要重新取流
+        this.pausedFromLoading = false
+        if (this.songs.length === 0) return false
+        this.resetStreamFailureState()
+        return this.playWithSkip(Math.max(0, this.index), MAX_CONSECUTIVE_SKIP)
+      }
       if (await this.controller.resume(this.accountId, this.deviceId)) {
         this.status = 'playing'
         this.startedAt = Date.now()
@@ -742,6 +925,7 @@ export class MiotPlayer {
     }
     if (this.status === 'stopped' || this.status === 'error' || this.status === 'idle') {
       if (this.songs.length === 0) return false
+      this.resetStreamFailureState()
       return this.playWithSkip(Math.max(0, this.index), MAX_CONSECUTIVE_SKIP)
     }
     return false
@@ -749,6 +933,7 @@ export class MiotPlayer {
 
   async stopInternal(): Promise<void> {
     this.clearTimers()
+    this.pausedFromLoading = false
     this.generation++
     try {
       await this.controller.stop(this.accountId, this.deviceId)
@@ -769,6 +954,7 @@ export class MiotPlayer {
 
   async next(): Promise<boolean> {
     await this.ensureLoaded()
+    this.resetStreamFailureState()
     // 上一首因删除歌曲而失败时，index 已指向补位歌曲，直接播它
     const nextIndex = this.status === 'error' && this.lastFailureRemoved && this.index < this.songs.length
       ? this.index
@@ -779,6 +965,7 @@ export class MiotPlayer {
 
   async previous(): Promise<boolean> {
     await this.ensureLoaded()
+    this.resetStreamFailureState()
     if (this.songs.length === 0) return false
     if (this.position() > 5) return this.playAt(this.index)
     const prev = this.index > 0 ? this.index - 1 : (this.mode === 'loop' ? this.songs.length - 1 : -1)
@@ -968,6 +1155,8 @@ export class MiotPlayer {
     } catch { /* ignore */ }
     if (!state || state.status === 1 || this.status !== 'playing') return
     if (state.status === 2 && await this.controller.resume(this.accountId, this.deviceId)) {
+      this.playReceiptUncertain = false
+      this.playRecoveryAttempts = 0
       this.startedAt = Date.now()
       this.scheduleEndTimer()
       this.scheduleStatusPoll()

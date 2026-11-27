@@ -1,13 +1,17 @@
 /* Shared Web rating controls. Ratings live in user metadata, never in playlists. */
 window.RatingManager = (() => {
     const controls = new Map();
-    let fingerprint = '', generation = 0, refreshSequence = 0, openSequence = 0, queued = false, dialog, collectionDialog, collectionReload, lastVersion = '', controlsRevision = 0, paintedRevision = -1;
+    const ratingCache = new Map();
+    let fingerprint = '', generation = 0, refreshSequence = 0, openSequence = 0, refreshing = null, refreshQueued = false, refreshTimer = 0, dialog, collectionDialog, collectionReload, lastVersion = '', lastSignature = '';
     const LABELS = ['', '很差', '一般', '还行', '喜欢', '超赞'];
+    const AUTH_STORAGE_KEYS = new Set(['lx_sync_user', 'lx_user_token', 'lx_sync_pass', 'lx_sync_mode']);
     const scope = () => `${localStorage.getItem('lx_sync_user') || ''}:${localStorage.getItem('lx_user_token') || ''}`;
+    const songKey = song => `${song?.source || ''}\u0000${song?.id ?? song?.songmid ?? ''}\u0000${song?.name || ''}\u0000${song?.singer || ''}`;
+    const signatureOf = entries => [...new Set(entries.map(info => info.key))].sort().join('\u0001');
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     function checkScope() {
         const next = scope();
-        if (next !== fingerprint) { fingerprint = next; generation++; lastVersion = ''; paintedRevision = -1; for (const info of controls.values()) { info.id = null; info.rating = 0; paint(info); } if (dialog?.open) dialog.close(); if (collectionDialog?.open) collectionDialog.close(); }
+        if (next !== fingerprint) { fingerprint = next; generation++; lastVersion = ''; lastSignature = ''; ratingCache.clear(); for (const info of controls.values()) { info.id = null; info.rating = 0; info.error = undefined; paint(info); } if (dialog?.open) dialog.close(); if (collectionDialog?.open) collectionDialog.close(); }
         return generation;
     }
     function paint(info) {
@@ -32,50 +36,99 @@ window.RatingManager = (() => {
         const requestedUser = localStorage.getItem('lx_sync_user');
         if (typeof ensureUserAuthToken === 'function') await ensureUserAuthToken();
         if (requestedUser !== localStorage.getItem('lx_sync_user')) throw Error('账号已切换，请重试');
-        const headers = { ...(typeof getUserAuthHeaders === 'function' ? getUserAuthHeaders() : {}), 'Content-Type': 'application/json' };
-        const response = await fetch(endpoint, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+        const send = () => fetch(endpoint, {
+            method: body ? 'POST' : 'GET',
+            headers: { ...(typeof getUserAuthHeaders === 'function' ? getUserAuthHeaders() : {}), 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined
+        });
+        let response = await send();
+        // 会话过期时强制续签并重试一次，而不是每个请求都先验一次 Token。
+        if (response.status === 401 && typeof ensureUserAuthToken === 'function' && await ensureUserAuthToken({ force: true })) {
+            if (requestedUser !== localStorage.getItem('lx_sync_user')) throw Error('账号已切换，请重试');
+            response = await send();
+        }
         const data = await response.json();
         if (!response.ok) throw Error(data.error || '评分请求失败');
         return data;
     }
-    async function refresh() {
+    function applyEntry(info, entry) {
+        const cached = { id: entry.id, rating: entry.rating || 0, error: entry.error };
+        ratingCache.set(info.key, cached);
+        for (const other of controls.values()) {
+            if (other.key !== info.key) continue;
+            other.id = cached.id; other.rating = cached.rating; other.error = cached.error; paint(other);
+        }
+    }
+    async function runRefresh() {
         const sequence = ++refreshSequence;
         const epoch = checkScope(), user = fingerprint;
         for (const [button] of controls) if (!button.isConnected) controls.delete(button);
         if (!localStorage.getItem('lx_sync_user')) return;
         if (collectionDialog?.open) void collectionReload?.();
-        if (lastVersion && paintedRevision === controlsRevision) {
-            try { const current = await request({operation:'version'}); if (sequence !== refreshSequence || scope() !== user || generation !== epoch) return; if (current.version && current.version === lastVersion) return; } catch { /* 网络恢复后继续批量查询 */ }
-        }
-        const revision = controlsRevision;
-        let observedVersion = '', versionConsistent = true;
         const entries = [...controls.values()];
+        if (!entries.length) return;
+        if (entries.every(info => ratingCache.has(info.key))) {
+            // 全部命中缓存且控件集合未变时只查版本号；版本一致就不再重复解析。
+            lastSignature = signatureOf(entries);
+            const previousVersion = lastVersion;
+            try {
+                const current = await request({ operation: 'version' });
+                if (sequence !== refreshSequence || generation !== epoch || scope() !== user) return;
+                if (!current.version || current.version === previousVersion) { if (current.version) lastVersion = current.version; return; }
+            } catch { return; /* 网络异常时保留现有显示，下个周期再试 */ }
+        }
+        let observedVersion = '', versionConsistent = true;
         for (let start = 0; start < entries.length; start += 100) {
             const batch = entries.slice(start, start + 100);
             try {
                 const data = await request({ operation: 'resolve', songs: batch.map(x => x.song) });
-                if (sequence !== refreshSequence || scope() !== user || generation !== epoch) return;
+                if (sequence !== refreshSequence || generation !== epoch || scope() !== user) return;
                 if (!observedVersion) observedVersion = data.version || '';
                 else if (data.version !== observedVersion) versionConsistent = false;
-                batch.forEach((info, index) => { const entry = data.entries[index]; info.id = entry.id; info.rating = entry.rating; info.error = entry.error; paint(info); });
+                batch.forEach((info, index) => { const entry = data.entries?.[index]; if (entry) applyEntry(info, entry); });
             } catch { versionConsistent = false; /* 下次重试 */ }
         }
-        if (sequence === refreshSequence && observedVersion && versionConsistent) { lastVersion = observedVersion; paintedRevision = revision; }
+        if (sequence !== refreshSequence || generation !== epoch || scope() !== user) return;
+        // 清掉已不在界面上的缓存，保证缓存整体对应同一个版本号。
+        const liveKeys = new Set(entries.map(info => info.key));
+        for (const key of [...ratingCache.keys()]) if (!liveKeys.has(key)) ratingCache.delete(key);
+        if (observedVersion && versionConsistent) { lastVersion = observedVersion; lastSignature = signatureOf([...controls.values()]); }
+    }
+    function refresh() {
+        if (refreshing) { refreshQueued = true; return refreshing; }
+        refreshing = (async () => {
+            try {
+                do { refreshQueued = false; await runRefresh(); } while (refreshQueued);
+            } finally { refreshing = null; }
+        })();
+        return refreshing;
+    }
+    function scheduleRefresh() {
+        if (refreshTimer) return;
+        refreshTimer = setTimeout(() => { refreshTimer = 0; refresh(); }, 250);
     }
     function attach(button, song, tag = false) {
         if (!button || !song) return;
         checkScope();
         button.classList?.add('rating-chip');
         if (tag) button.classList?.add('rating-score-tag');
-        const info = { button, song, id: null, rating: 0, tag };
-        controls.set(button, info); controlsRevision++; paint(info);
+        const key = songKey(song);
+        const existing = controls.get(button);
+        if (existing && existing.key === key && existing.tag === tag) {
+            existing.song = song;
+        } else {
+            const cached = ratingCache.get(key);
+            const info = { button, song, key, id: cached?.id ?? null, rating: cached?.rating ?? 0, error: cached?.error, tag };
+            controls.set(button, info); paint(info);
+        }
         if (!tag) {
             const row = button.closest?.('[data-song-id], [data-lm-row-index], tr');
             const host = row?.querySelector('[data-rating-badges]');
             if (host) attachTag(host, song);
         }
         button.onclick = event => { event.preventDefault(); event.stopPropagation(); open(song); };
-        if (!queued) { queued = true; queueMicrotask(() => { queued = false; refresh(); }); }
+        // 同一渲染批次内的多次 attach 合并成一次刷新；已缓存时只做一次版本查询。
+        scheduleRefresh();
     }
     function attachTag(host, song) {
         if (!host || !song) return;
@@ -170,6 +223,7 @@ window.RatingManager = (() => {
                 const result = await request({ song, rating: value });
                 if (scope() !== user || generation !== epoch) return;
                 for (const info of controls.values()) if (info.id === result.id) { info.rating = result.rating; paint(info); }
+                for (const cached of ratingCache.values()) if (cached.id === result.id) cached.rating = result.rating;
                 status.textContent = result.rating ? `已保存：${result.rating} 星` : '已清除评分';
                 picker.setClear(!!result.rating);
                 notice(result.warning || (value ? `已评 ${value} 星` : '已清除评分'), !!result.warning);
@@ -368,7 +422,13 @@ window.RatingManager = (() => {
     window.addEventListener('ratingidentitychange', () => refresh());
     window.addEventListener('ratingdatachange', () => refresh());
     window.addEventListener('ratingaccountchange', () => { checkScope(); refresh(); loadPreference(); });
-    window.addEventListener('storage', () => { checkScope(); refresh(); loadPreference(); });
+    let storageTimer = 0;
+    window.addEventListener('storage', event => {
+        // 其他页签的主题、播放进度等无关写入不再触发评分/偏好刷新
+        if (event.key !== null && !AUTH_STORAGE_KEYS.has(event.key)) return;
+        if (storageTimer) return;
+        storageTimer = setTimeout(() => { storageTimer = 0; checkScope(); refresh(); loadPreference(); }, 500);
+    });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
     setInterval(() => { if (!document.hidden) refresh(); }, 30000);
     return { attach, attachTag, open, refresh, current, browse, loadPreference, setDislikeAutoRating };

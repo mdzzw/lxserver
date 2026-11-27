@@ -81,6 +81,7 @@ export class MiotStore {
   private data: MiotStoreData = defaultData()
   private timer: ReturnType<typeof setTimeout> | null = null
   private dirty = false
+  private flushing = false
 
   private getFile(): string {
     if (!this.file) this.file = path.join(global.lx.dataPath, STORE_FILE)
@@ -162,16 +163,44 @@ export class MiotStore {
     }, 500)
   }
 
+  private serialize = (): string => JSON.stringify(this.get(), null, 2)
+
+  /** 异步落盘：播放状态等高频保存不再同步写文件阻塞事件循环。 */
   flush(): void {
-    if (!this.dirty) return
+    if (!this.dirty || this.flushing) return
     this.dirty = false
+    this.flushing = true
     const file = this.getFile()
+    const payload = this.serialize()
+    void (async () => {
+      try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true })
+        const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+        await fs.promises.writeFile(tmp, payload, 'utf8')
+        await fs.promises.rename(tmp, file)
+      } catch (err: any) {
+        this.dirty = true
+        miotLog.error('[MIoT] 保存配置失败:', err?.message || err)
+      } finally {
+        this.flushing = false
+        if (this.dirty) this.save()
+      }
+    })()
+  }
+
+  /** 进程退出/停机时同步落盘，保证最后一次修改不丢失。 */
+  flushSync(): void {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null }
+    if (!this.file) return
+    this.dirty = false
+    const file = this.file
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-      fs.writeFileSync(tmp, JSON.stringify(this.get(), null, 2), 'utf8')
+      fs.writeFileSync(tmp, this.serialize(), 'utf8')
       fs.renameSync(tmp, file)
     } catch (err: any) {
+      this.dirty = true
       miotLog.error('[MIoT] 保存配置失败:', err?.message || err)
     }
   }

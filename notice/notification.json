@@ -18,25 +18,25 @@
         }
     },
     {
-        "comment": "=== 版本更新 v2.3.25 ===",
-        "id": "update_v2_3_25",
+        "comment": "=== 版本更新 v2.3.32 ===",
+        "id": "update_v2_3_32",
         "status": "active",
         "type": "version",
         "logic": {
-            "target_version": "v2.3.25",
+            "target_version": "v2.3.32",
             "operator": "<",
             "interval_hours": 24
         },
         "ui": {
-            "title": "发现新版本 v2.3.25",
-            "date": "2026-11-26",
-            "message": "本次更新完成仓库迁移与链接统一：\n1. 项目源码与发布地址统一为 https://github.com/mdzzw/lxserver ，关于页、文档站、README、Issue 模板等入口全部同步。\n2. 「检查更新」改为读取仓库 notice/notification.json，更新提示直达新的 GitHub Releases 页面。\n3. 文档 Docker 部署示例切换为 GHCR 镜像 ghcr.io/mdzzw/lxserver:latest。\n4. 安全漏洞上报方式调整为 GitHub 私有安全公告。\n5. 重新构建 fnOS 安装包，支持覆盖升级。",
+            "title": "发现新版本 v2.3.32",
+            "date": "2026-11-27",
+            "message": "本次更新重点提升播放失败兜底速度：\n1. 小爱与落雪网页共用错峰多路竞速，首路解析时并行跨平台匹配搜索，候选失败立即补位。\n2. 探测超时减半，多路成功后按音质最高择优播放。\n3. 并发路数、错峰间隔、探测超时与成功等待窗口均可在「系统配置」调整。\n4. 修复歌曲结束换源期间重复播放上一首、加载中暂停不生效等问题，试听片段按真实时长识别。",
             "confirm_text": "查看日志",
             "cancel_text": "稍后提醒"
         },
         "action": {
             "type": "link",
-            "url": "https://github.com/mdzzw/lxserver/releases/tag/v2.3.25"
+            "url": "https://github.com/mdzzw/lxserver/releases/tag/v2.3.32"
         }
     }
 ]

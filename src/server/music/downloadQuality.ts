@@ -16,6 +16,12 @@ export const getDownloadQualityCandidates = (requestedQuality: string) => {
   return DOWNLOAD_QUALITY_PRIORITY.slice(index)
 }
 
+/** 音质排名，越小越好；未知音质排最后，竞速择优时不会压过已知音质。 */
+export const getQualityRank = (quality: string): number => {
+  const index = DOWNLOAD_QUALITY_PRIORITY.indexOf(quality as typeof DOWNLOAD_QUALITY_PRIORITY[number])
+  return index >= 0 ? index : DOWNLOAD_QUALITY_PRIORITY.length
+}
+
 export const resolveWithQualityFallback = async <T extends { url?: string, type?: string }>(
   requestedQuality: string,
   resolve: (quality: string) => Promise<T>,

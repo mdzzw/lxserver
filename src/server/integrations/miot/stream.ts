@@ -62,6 +62,12 @@ const streamExtension = (resolved: ResolvedSongSource): string => {
   return /^[a-z0-9]{1,5}$/.test(ext) ? ext : 'mp3'
 }
 
+export interface CreatedStream {
+  url: string
+  /** 探测到的真实音频时长（秒），用于校准标注时长不准时的结束定时 */
+  durationSeconds: number | null
+}
+
 export const createStreamUrl = async (
   accountId: string,
   deviceId: string,
@@ -69,7 +75,7 @@ export const createStreamUrl = async (
   username: string,
   quality: string,
   options: { publicBaseUrl: string; cacheOnPlay: boolean; vipAutoDownload: boolean },
-): Promise<string | null> => {
+): Promise<CreatedStream | null> => {
   const resolved = await resolveSongSource(song, username, quality)
   if (!resolved) return null
 
@@ -101,8 +107,14 @@ export const createStreamUrl = async (
     lastAccessAt: now,
   })
   miotLog.info(`[MIoT] stream ticket ${resolved.kind} "${song.name}" device=${deviceId} quality=${resolved.quality}`)
-  return `${getStreamBaseUrl(options.publicBaseUrl)}${STREAM_PREFIX}${token}.${streamExtension(resolved)}`
+  return {
+    url: `${getStreamBaseUrl(options.publicBaseUrl)}${STREAM_PREFIX}${token}.${streamExtension(resolved)}`,
+    durationSeconds: resolved.durationSeconds ?? null,
+  }
 }
+
+const PROXY_HEADERS_TIMEOUT_MS = 20000
+const PROXY_IDLE_TIMEOUT_MS = 60000
 
 const proxyRemote = async (req: http.IncomingMessage, res: http.ServerResponse, remoteUrl: string): Promise<void> => {
   const headers: Record<string, string> = {
@@ -112,17 +124,27 @@ const proxyRemote = async (req: http.IncomingMessage, res: http.ServerResponse, 
   if (req.headers.range) headers.Range = req.headers.range
 
   const controller = new AbortController()
-  res.once('close', () => controller.abort())
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+  const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null } }
+  // 上游长时间不响应或中途卡死时主动断开，避免失败拉流一直挂着拖慢整体请求
+  const armIdle = () => {
+    clearIdle()
+    idleTimer = setTimeout(() => controller.abort(), PROXY_IDLE_TIMEOUT_MS)
+  }
+  const headerTimer = setTimeout(() => controller.abort(), PROXY_HEADERS_TIMEOUT_MS)
+  res.once('close', () => { clearTimeout(headerTimer); clearIdle(); controller.abort() })
 
   let upstream: Response
   try {
     upstream = await fetch(remoteUrl, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'follow', signal: controller.signal })
   } catch (err: any) {
+    clearTimeout(headerTimer)
     miotLog.warn(`[MIoT] stream upstream fetch failed: ${err?.message || err}`)
     if (!res.headersSent) res.writeHead(502)
     res.end()
     return
   }
+  clearTimeout(headerTimer)
 
   res.statusCode = upstream.status
   const contentType = upstream.headers.get('content-type')
@@ -139,8 +161,12 @@ const proxyRemote = async (req: http.IncomingMessage, res: http.ServerResponse, 
   }
 
   const stream = Readable.fromWeb(upstream.body as any)
-  stream.on('error', () => res.destroy())
-  res.once('close', () => stream.destroy())
+  armIdle()
+  stream.on('data', armIdle)
+  stream.on('end', clearIdle)
+  stream.on('close', clearIdle)
+  stream.on('error', () => { clearIdle(); res.destroy() })
+  res.once('close', () => { clearIdle(); stream.destroy() })
   stream.pipe(res)
 }
 

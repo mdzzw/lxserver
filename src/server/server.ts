@@ -154,6 +154,8 @@ import { getUpdatedListIds, removeUpdatedListId } from './task/networkListTask'
 import { setSongResolver, getSyncDownloadData, saveSyncDownloadData, getUserSyncProgress, triggerUserSync, cancelUserSync, getUserSyncStorageLocation, isUserSyncRunning, migrateSyncStorage } from './task/syncDownloadTask'
 import { getDownloadQualityCandidates } from './music/downloadQuality'
 import { findSourceMatches } from './music/sourceMatch'
+import { resolveWebSongSource } from './music/webFallback'
+import { normalizePlaybackRacePatch, PLAYBACK_RACE_CONFIG_KEYS } from './music/fastFallback'
 import crypto from 'node:crypto'
 import { parseCookies, resolveContainedPath, resolvePublicUrl, fetchPublicBuffer } from './auth/security'
 import { createCastHandler } from './integrations/castAccess'
@@ -6706,30 +6708,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               throw new Error('Invalid songInfo')
             }
             const source = songInfo.source
-            let result: any
 
-            let customSourceError: string | null = null
-            let attempts: any[] = []
-            if (isSourceSupported(source, verifiedUsername)) {
-              try {
-                console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
-
-                const userApiResult = await callUserApiGetMusicUrl(
-                  source, songInfo, quality || '128k', verifiedUsername,
-                  (attempt) => { void pushProgress(attempt) },
-                  enableAutoSwitchApiSource !== false,
-                  excludeApiSources
-                )
-                result = userApiResult
-                attempts = userApiResult.attempts || []
-              } catch (userApiError: any) {
-                console.error(`[歌曲播放] 自定义源解析失败:`, userApiError.message)
-                customSourceError = userApiError.message
-                attempts = userApiError.attempts || []
-                // 不抛出错误，继续尝试内置源
-              }
-            } else {
-              // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
+            // 无任何自定义源支持此平台时立即通知前端
+            if (!isSourceSupported(source, verifiedUsername)) {
               const hasAvailableSource = getLoadedApis().some(api =>
                 Object.keys(api.sources || {}).some(platform => isSourceSupported(platform, verifiedUsername)))
               const err: any = new Error(hasAvailableSource
@@ -6740,13 +6721,27 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               throw err
             }
 
-            // 自定义源失败则直接报错（内置 SDK 无独立解析能力，回退无意义）
-            if (!result) {
-              const errMsg = customSourceError || `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
-              const err: any = new Error(errMsg)
-              err.attempts = attempts
-              throw err
+            // 服务端统一兜底：原平台失败时按用户设置自动换源/降品，小爱与网页共用同一套错峰竞速规则
+            console.log(`[歌曲播放] 竞速解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
+            const outcome = await resolveWebSongSource(
+              songInfo,
+              quality || '128k',
+              verifiedUsername,
+              enableAutoSwitchApiSource !== false,
+              excludeApiSources,
+            )
+            const result: any = outcome.result
+            const attempts = outcome.attempts
+            if (outcome.source !== source) {
+              console.log(`[歌曲播放] 换源成功: ${source} -> ${outcome.source} (${attempts.length} 次尝试)`)
+            } else if (result.type && result.type !== (quality || '128k')) {
+              console.log(`[歌曲播放] 降质成功: ${quality} -> ${result.type}`)
             }
+            void pushProgress({
+              name: result.sourceName || outcome.source,
+              status: 'success',
+              message: outcome.source === source ? '解析成功' : `换源解析成功（${outcome.source}）`,
+            })
 
             // 合并解析尝试记录到响应（前端可用于诊断）
             if (attempts.length > 0) result.attempts = attempts
@@ -6810,7 +6805,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
 
               result.requestedSource = songInfo.source
-              result.downloadSource = fileCache.detectDownloadSource(result.url, songInfo.source)
+              result.downloadSource = fileCache.detectDownloadSource(result.url, outcome.source)
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -7448,6 +7443,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'player.name': global.lx.config['player.name'] || 'LX Music Web',
             'player.enableAuth': global.lx.config['player.enableAuth'] || false,
             'player.password': global.lx.config['player.password'] || '',
+            'playback.fallback.maxConcurrency': global.lx.config['playback.fallback.maxConcurrency'] ?? 2,
+            'playback.fallback.staggerMs': global.lx.config['playback.fallback.staggerMs'] ?? 700,
+            'playback.fallback.probeTimeoutMs': global.lx.config['playback.fallback.probeTimeoutMs'] ?? 2000,
+            'playback.fallback.deepProbeTimeoutMs': global.lx.config['playback.fallback.deepProbeTimeoutMs'] ?? 3000,
+            'playback.fallback.successWaitMs': global.lx.config['playback.fallback.successWaitMs'] ?? 400,
             'webdav.enable': global.lx.config['webdav.enable'] ?? false,
             'webdav.url': global.lx.config['webdav.url'] || '',
             'webdav.username': global.lx.config['webdav.username'] || '',
@@ -7550,6 +7550,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           void readBody(req).then(async (body) => {
             try {
               const newConfig = JSON.parse(body)
+              // 播放兜底竞速：仅写入本次提交的字段，并按安全范围归一化（小爱与网页共用）
+              const playbackRacePatch = normalizePlaybackRacePatch(newConfig)
+              for (const [field, value] of Object.entries(playbackRacePatch)) {
+                if (value === undefined) continue
+                const key = PLAYBACK_RACE_CONFIG_KEYS[field as keyof typeof PLAYBACK_RACE_CONFIG_KEYS]
+                ;(global.lx.config as any)[key] = value
+              }
               for (const destination of ['webdav', 'openlist'] as const) {
                 const key = `backup.${destination}.types` as const
                 if (newConfig[key] !== undefined) {

@@ -3036,6 +3036,13 @@ class App {
                 form.elements['player.password'].value = config['player.password'] || '';
             }
 
+            // 播放兜底竞速（小爱与网页共用）
+            ['maxConcurrency', 'staggerMs', 'probeTimeoutMs', 'deepProbeTimeoutMs', 'successWaitMs'].forEach(field => {
+                const el = form.elements[`playback.fallback.${field}`];
+                const value = config[`playback.fallback.${field}`];
+                if (el && value != null) el.value = value;
+            });
+
             // URL路径配置
             if (form.elements['admin.path']) {
                 form.elements['admin.path'].value = config['admin.path'] ?? '';
@@ -3513,6 +3520,15 @@ class App {
             'player.name': (formData.get('player.name') || '').trim() || 'LX Music Web',
             'player.enableAuth': formData.get('player.enableAuth') === 'on',
             'player.password': formData.get('player.password'),
+            ...(() => {
+                const out = {};
+                ['maxConcurrency', 'staggerMs', 'probeTimeoutMs', 'deepProbeTimeoutMs', 'successWaitMs'].forEach(field => {
+                    const key = `playback.fallback.${field}`;
+                    const parsed = parseInt(formData.get(key), 10);
+                    if (Number.isFinite(parsed)) out[key] = parsed;
+                });
+                return out;
+            })(),
             'admin.path': adminPath,
             'player.path': playerPath,
             'system.allowUnsafeVM': formData.get('system.allowUnsafeVM') === 'on',

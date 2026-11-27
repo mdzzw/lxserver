@@ -78,6 +78,22 @@ const getSongMatchScore = (candidate: any, target: any) => {
   return nameScore + durationScore + albumScore
 }
 
+const MAX_SWITCH_MATCHES = 4
+
+/** 每个平台只取匹配度最高的版本，避免原版失败时误播伴奏/DJ 版。 */
+export const pickSwitchCandidates = <T extends { source?: string }>(matches: T[]): T[] => {
+  const picked: T[] = []
+  const seenSources = new Set<string>()
+  for (const match of matches) {
+    const source = String(match?.source || '')
+    if (!source || seenSources.has(source)) continue
+    seenSources.add(source)
+    picked.push(match)
+    if (picked.length >= MAX_SWITCH_MATCHES) break
+  }
+  return picked
+}
+
 /**
  * 跨平台同曲匹配：只搜索当前用户已加载自定义源的平台，按标题/歌手/时长严格过滤后按匹配度排序。
  * 结果缓存 60 秒，避免播放失败连续跳过时对同一首歌重复搜索。

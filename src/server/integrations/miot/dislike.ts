@@ -3,8 +3,8 @@ import path from 'node:path'
 import { getUserDirname, getUserSpace } from '@/user'
 import { normalizeText, splitSingers } from '@/modules/dislike/match'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
+import { openLibraryUser } from '@/server/music/playbackFallback'
 import { miotLog } from './log'
-import { openLibraryUser } from './resolver'
 import type { MiotSong } from './types'
 
 export interface MiotDislikeResult {
