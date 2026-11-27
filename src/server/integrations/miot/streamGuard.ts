@@ -8,6 +8,10 @@ export const STREAM_FAIL_WINDOW_MS = 90 * 1000
 export const STREAM_FAIL_VERIFY_MS = 2000
 /** 我方 TTS/播报会打断流播放，期间不判定拉流失败 */
 export const STREAM_TTS_GRACE_MS = 20 * 1000
+/** 反复重拉同一播放地址的统计窗口 */
+export const STREAM_LOOP_WINDOW_MS = 30 * 1000
+/** 窗口内同一播放地址被重拉达到该次数，视为试听/截断流循环 */
+export const STREAM_LOOP_MIN_FETCHES = 5
 
 export type DeviceStopVerdict = 'ended' | 'stream-failed' | 'tts-interrupted' | 'defer'
 
@@ -36,4 +40,17 @@ export const classifyDeviceStop = (context: DeviceStopContext): DeviceStopVerdic
   if (!context.playStartedAt || context.now - context.playStartedAt > STREAM_FAIL_WINDOW_MS) return 'defer'
   if (context.hasPosition && context.devicePosition >= STREAM_CONFIRM_POSITION_SEC) return 'defer'
   return 'stream-failed'
+}
+
+/**
+ * 试听/截断流播完后，音箱会立刻重新拉取同一地址并提示“没有版权”，
+ * 但设备状态仍上报 playing，单靠停止事件无法发现。
+ */
+export const isStreamFetchLoop = (fetches: readonly number[], now: number): boolean => {
+  let count = 0
+  for (let index = fetches.length - 1; index >= 0; index--) {
+    if (now - fetches[index] > STREAM_LOOP_WINDOW_MS) break
+    count++
+  }
+  return count >= STREAM_LOOP_MIN_FETCHES
 }

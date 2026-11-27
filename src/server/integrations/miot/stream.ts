@@ -6,13 +6,18 @@ import { serveLocalTrack } from '@/server/music/subsonicLocal'
 import { randomToken } from './crypto'
 import { miotLog } from './log'
 import { resolveSongSource, warmSongCache, warmVipDownload, type ResolvedSongSource } from './resolver'
+import { isStreamFetchLoop } from './streamGuard'
 import type { MiotSong, MiotStreamTicket } from './types'
 
 const TICKET_TTL_MS = 3 * 3600 * 1000
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000
 const STREAM_PREFIX = '/api/miot/stream/'
+/** 每个 ticket 的拉流时间只用来识别循环重拉，保留两分钟即可 */
+const FETCH_HISTORY_TTL_MS = 2 * 60 * 1000
 
 const tickets = new Map<string, MiotStreamTicket>()
+/** 设备端对同一播放地址的 GET 时间戳（升序），用于识别试听/截断流循环 */
+const fetchHistory = new Map<string, number[]>()
 let lastExternalHost = ''
 
 setInterval(() => {
@@ -20,7 +25,38 @@ setInterval(() => {
   for (const [token, ticket] of tickets) {
     if (ticket.expiresAt <= now) tickets.delete(token)
   }
+  for (const [token, fetches] of fetchHistory) {
+    const latest = fetches[fetches.length - 1] ?? 0
+    if (now - latest > FETCH_HISTORY_TTL_MS) fetchHistory.delete(token)
+  }
 }, CLEANUP_INTERVAL_MS).unref()
+
+const recordStreamFetch = (token: string, now: number): void => {
+  const fetches = fetchHistory.get(token)
+  if (!fetches) {
+    fetchHistory.set(token, [now])
+    return
+  }
+  const cutoff = now - FETCH_HISTORY_TTL_MS
+  let stale = 0
+  while (stale < fetches.length && fetches[stale] < cutoff) stale++
+  if (stale > 0) fetches.splice(0, stale)
+  fetches.push(now)
+}
+
+/**
+ * 试听/截断流播完后音箱会立即重拉同一地址并提示“没有版权”，
+ * 设备状态却一直是 playing，不触发停止事件，只能靠拉流频率识别。
+ */
+export const isStreamUrlLooping = (url: string, now = Date.now()): boolean => {
+  if (!url) return false
+  const marker = '/api/miot/stream/'
+  const at = url.indexOf(marker)
+  if (at < 0) return false
+  const token = url.slice(at + marker.length).split(/[.?/]/)[0]
+  const fetches = fetchHistory.get(token)
+  return !!fetches && isStreamFetchLoop(fetches, now)
+}
 
 const isLocalHost = (host: string): boolean => {
   const hostname = host.split(':')[0].replace(/^\[|\]$/g, '').toLowerCase()
@@ -204,6 +240,7 @@ export const handleMiotStream = async (req: http.IncomingMessage, res: http.Serv
     return true
   }
   ticket.lastAccessAt = Date.now()
+  if (req.method === 'GET') recordStreamFetch(token, ticket.lastAccessAt)
 
   try {
     if (ticket.kind === 'local' && ticket.localTrack) {

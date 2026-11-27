@@ -3,7 +3,7 @@ import { songKey } from './aiRecommend'
 import { addSongToList, addSongToLoved, isSongLoved, loadPlaylist, removeSongFromList, removeSongFromLoved, type LoadedPlaylist } from './library'
 import { miotLog } from './log'
 import { normalizePlayMode, type MiotStore } from './store'
-import { createStreamUrl } from './stream'
+import { createStreamUrl, isStreamUrlLooping } from './stream'
 import {
   classifyDeviceStop,
   STREAM_CONFIRM_POSITION_SEC,
@@ -35,6 +35,10 @@ const CONTROL_TIMEOUT_RECHECK_MS = 4000
 const MAX_PLAY_RECOVERY_ATTEMPTS = 2
 /** 临时队列或删歌失败时无法真正前进，连续失败到这里后停止，避免原地重试同一首 */
 const MAX_UNREMOVED_STREAM_FAILURES = 3
+/** 判定拉流循环时设备进度仍应停在该秒数以内（试听/截断流每次重拉都回到开头） */
+const STREAM_LOOP_POSITION_LIMIT_SEC = 10
+/** 连续多次状态轮询都命中循环才处理，避免把大文件开头的分块拉流误判成循环 */
+const STREAM_LOOP_CONFIRM_POLLS = 2
 
 export interface MiotPlayerContext {
   store: MiotStore
@@ -115,6 +119,7 @@ export class MiotPlayer {
   private streamFailureHandling = false
   private streamFailureStreak = 0
   private streamFailureUnremoved = 0
+  private loopDetectionHits = 0
   private autoRecommend = false
   private recommendSeed: MiotSong | null = null
   private recommendType = ''
@@ -468,6 +473,7 @@ export class MiotPlayer {
     this.playConfirmed = false
     this.playingSamples = 0
     this.streamFailureHandling = false
+    this.loopDetectionHits = 0
     this.updatedAt = Date.now()
     if (this.autoRecommend) this.recommendPlayed.add(songKey(song))
     if (result === 'timeout') {
@@ -681,6 +687,7 @@ export class MiotPlayer {
       this.playStartedAt = this.startedAt
       this.playConfirmed = false
       this.playingSamples = 0
+      this.loopDetectionHits = 0
       this.updatedAt = Date.now()
       this.persist()
       this.scheduleEndTimer()
@@ -709,9 +716,10 @@ export class MiotPlayer {
    * 设备已接受播放指令但从未真正起播（典型为提示“没有版权/无可用音源”后停止）：
    * 从歌单删除该曲并切到下一首，连续失败也继续，不主动停播；
    * 只有临时队列/删除失败导致无法前进时才设上限，避免原地重试同一首。
+   * force：用于设备一直回 playing 的循环拉流，此时已起播确认不再作为跳过依据。
    */
-  private async handleStreamFailure(): Promise<void> {
-    if (this.status !== 'playing' || this.playConfirmed || this.streamFailureHandling) return
+  private async handleStreamFailure(reason = '音箱拉流失败（未确认起播即停止）', force = false): Promise<void> {
+    if (this.status !== 'playing' || this.streamFailureHandling || (this.playConfirmed && !force)) return
     const song = this.currentSong()
     if (!song) return
     this.streamFailureHandling = true
@@ -723,9 +731,9 @@ export class MiotPlayer {
       this.updatedAt = Date.now()
 
       this.streamFailureStreak++
-      miotLog.warn(`[MIoT] 音箱拉流失败（未确认起播即停止）"${song.name}" - ${song.singer} source=${song.source || '未知'}，连续第 ${this.streamFailureStreak} 首`)
+      miotLog.warn(`[MIoT] ${reason} "${song.name}" - ${song.singer} source=${song.source || '未知'}，连续第 ${this.streamFailureStreak} 首`)
 
-      const removed = await this.dropUnplayableSong(song, '音箱拉流失败（未起播）')
+      const removed = await this.dropUnplayableSong(song, reason)
       if (generation !== this.generation) return
       this.lastFailureRemoved = removed
       if (removed) {
@@ -772,6 +780,15 @@ export class MiotPlayer {
     }
   }
 
+  /**
+   * 试听/截断流反复重拉时设备一直报 playing，永远不会触发停止事件；
+   * 有位置的型号还会表现为进度一直贴着开头。
+   */
+  private isLoopingPlayback(state: MiotDevicePlayState): boolean {
+    if (!this.currentPlayUrl || !isStreamUrlLooping(this.currentPlayUrl)) return false
+    return !state.hasPosition || state.position < STREAM_LOOP_POSITION_LIMIT_SEC
+  }
+
   private scheduleStatusPoll(delay = STATUS_POLL_MS): void {
     if (this.statusTimer) clearTimeout(this.statusTimer)
     this.statusTimer = setTimeout(() => {
@@ -793,6 +810,17 @@ export class MiotPlayer {
       return
     }
     if (state.status === 1) {
+      if (this.isLoopingPlayback(state)) {
+        this.loopDetectionHits++
+        if (this.loopDetectionHits >= STREAM_LOOP_CONFIRM_POLLS) {
+          // 设备在循环播放一个几秒的片段：和“未起播即停止”一样删歌切歌，
+          // 否则会一直提示没有版权且永远不前进
+          await this.handleStreamFailure('检测到音箱反复重拉同一播放地址（疑似试听/截断流循环）', true)
+          return
+        }
+      } else {
+        this.loopDetectionHits = 0
+      }
       // 有位置时以真实进度确认；部分型号位置恒为 0，连续两次 playing 也算起播
       this.playingSamples++
       if ((state.hasPosition && state.position >= STREAM_CONFIRM_POSITION_SEC) || this.playingSamples >= STREAM_CONFIRM_SAMPLES) {

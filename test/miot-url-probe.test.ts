@@ -192,7 +192,8 @@ test('full-size response skips the deep duration probe and passes', async t => {
   const server = await withServer((req, res) => {
     requests++
     const range = String(req.headers.range || '')
-    res.writeHead(206, { 'Content-Type': 'audio/mpeg', 'Content-Range': `bytes 0-1/${(158 * 6000) + 1}` })
+    // 高于绝对小文件阈值（1MB）且远大于 158s 的最低码率估算，才走跳过路径
+    res.writeHead(206, { 'Content-Type': 'audio/mpeg', 'Content-Range': `bytes 0-1/${(158 * 12000) + 1}` })
     res.end(range === 'bytes=0-1' ? 'ab' : 'unexpected')
   })
   t.after(server.close)

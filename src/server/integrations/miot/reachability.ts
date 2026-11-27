@@ -14,6 +14,11 @@ const PROBE_HEADERS = {
  */
 const MIN_BYTES_PER_SECOND = 6000
 const MIN_DURATION_FOR_SIZE_CHECK = 30
+/**
+ * 标注时长缺失/不可信时，小于该体积的链接一律核对音频头：
+ * 4 秒试听常见的 20KB~600KB 文件会被识别并按真实时长拒绝。
+ */
+const MIN_ABSOLUTE_PROBE_BYTES = 1024 * 1024
 
 /** 已确认时长的音频低于该值才视为试听/截断；短儿歌只要真实时长达到该值就照常播放。 */
 export const MIN_PLAYABLE_SECONDS = 10
@@ -154,9 +159,10 @@ export const inspectRemoteUrl = async (
   if (!probed.ok) return { verdict: 'unreachable', ...base }
   if (probed.playlist) return { verdict: 'ok', ...base }
 
-  const sizeSuspicious = probed.totalBytes > 0 &&
-    expectedSeconds >= MIN_DURATION_FOR_SIZE_CHECK &&
-    probed.totalBytes < expectedSeconds * MIN_BYTES_PER_SECOND
+  const sizeSuspicious = probed.totalBytes > 0 && (
+    probed.totalBytes < MIN_ABSOLUTE_PROBE_BYTES ||
+    (expectedSeconds >= MIN_DURATION_FOR_SIZE_CHECK && probed.totalBytes < expectedSeconds * MIN_BYTES_PER_SECOND)
+  )
   if (!sizeSuspicious) return { verdict: 'ok', ...base }
 
   const prefix = await probeAudioPrefix(url, deepTimeoutMs)
